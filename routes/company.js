@@ -1,163 +1,97 @@
 /**
- * ============================================================
- * 🏢 COMPANY ROUTES MODULE (PROTECTED BUSINESS LOGIC LAYER)
- * ============================================================
+ * =========================================================) can access their data. * ============================================================
  *
- * 🎯 PURPOSE:
- * This module defines all routes related to authenticated companies.
+ * It provides:
  *
- * It represents the "Business Logic Layer" of the SaaS system,
- * where only verified companies (via JWT) can access their data.
- *
- * ------------------------------------------------------------
- *
- * 🧠 ARCHITECTURAL ROLE:
- *
- * This layer sits AFTER authentication and BEFORE the data layer:
- *
- *      Client (Authenticated)
- *             ↓
- *      Auth Middleware
- *             ↓
- *      Company Routes  ← THIS FILE
- *             ↓
- *      MongoDB / External APIs
+ *   ✅ Secure company profile retrieval
+ *   ✅ Full database entity access
+ *   ✅ Controlled updates
+ *   ✅ Public company lookup (for employee routing)
  *
  * ------------------------------------------------------------
  *
- * 🧬 MULTI-TENANT PRINCIPLE:
+ * 🧠 ARCHITECTURAL FLOW:
  *
- * The system is designed as a Multi-Tenant Architecture:
+ *   Client (Authenticated)
+ *          ↓
+ *   JWT Middleware (auth.js)
+ *          ↓
+ *   Company Routes (THIS FILE)
+ *          ↓
+ *   MongoDB Database
  *
- *   - Each company is logically isolated
- *   - Each request carries company identity via JWT
- *   - Data is accessed ONLY within that company context
+ * ------------------------------------------------------------
+ *
+ * 🔬 CORE PRINCIPLE:
+ *
+ * "Identity is derived ONLY from verified JWT, never from client input"
  *
  * ------------------------------------------------------------
  *
- * 🔐 SECURITY PRINCIPLE:
- *
- * "Never trust client input — trust verified identity only"
- *
- * Identity is derived from:
- *   → req.company (decoded JWT payload)
- *
- * ------------------------------------------------------------
  */
 
 
-// ============================================================
-// 📦 MODULE IMPORTS
-// ============================================================
+/* ============================================================
+   📦 MODULE IMPORTS
+   ============================================================ */
 
 const express = require("express");
 const router = express.Router();
 
-/**
- * Authentication middleware
- *
- * Ensures:
- *   - Token is valid
- *   - Request is authenticated
- *   - Identity is attached to request
- */
 const auth = require("../middleware/auth");
 
 
-// ============================================================
-// 🔐 PROTECTED ROUTE: GET COMPANY PROFILE
-// ============================================================
+/* ============================================================
+   🔐 GET COMPANY PROFILE (LIGHTWEIGHT)
+   ============================================================ */
 
 /**
- * ------------------------------------------------------------
- * ✅ ENDPOINT:
+ * ✅ Endpoint:
  *   GET /company/profile
  *
- * ACCESS:
- *   🔐 Protected (requires valid JWT)
- *
  * PURPOSE:
- *   Returns authenticated company information
+ *   Returns identity extracted directly from JWT
  *
- * ------------------------------------------------------------
- *
- * 📊 FLOW DIAGRAM:
- *
- *   Client Request
- *       ↓
- *   Authorization Header
- *       ↓
- *   authMiddleware
- *       ↓
- *   req.company populated
- *       ↓
- *   Route executes
- *       ↓
- *   Response returned
- *
- * ------------------------------------------------------------
+ * CHARACTERISTICS:
+ *   - Fast response
+ *   - No DB access
+ *   - Minimal overhead
  */
-router.get("/profile", auth, async (req, res) => {
+router.get("/profile", auth, (req, res) => {
 
   try {
 
     /**
-     * ✅ Extract identity from JWT
-     *
-     * This is the ONLY trusted identity source
+     * ✅ Identity from token (trusted)
      */
-    const companyIdentity = req.company;
+    const company = req.company;
 
     res.json({
       success: true,
-      company: companyIdentity
+      company
     });
 
   } catch (err) {
-
-    res.status(500).json({
-      message: err.message
-    });
-
+    res.status(500).json({ message: "Server error" });
   }
 
 });
 
 
-// ============================================================
-// 🔐 PROTECTED ROUTE: GET FULL COMPANY DATA FROM DATABASE
-// ============================================================
+/* ============================================================
+   🔐 GET FULL COMPANY DATA (AUTHORITATIVE SOURCE)
+   ============================================================ */
 
 /**
- * ------------------------------------------------------------
- * ✅ ENDPOINT:
+ * ✅ Endpoint:
  *   GET /company/me
- *
- * ACCESS:
- *   🔐 Protected
  *
  * PURPOSE:
  *   Retrieves full company document from database
  *
- * DIFFERENCE FROM /profile:
- *   - /profile → JWT payload (lightweight)
- *   - /me → full DB record (authoritative)
- *
- * ------------------------------------------------------------
- *
- * 📊 FLOW DIAGRAM:
- *
- *   Client → Token
- *       ↓
- *   authMiddleware
- *       ↓
- *   Extract company.id
- *       ↓
- *   Query MongoDB
- *       ↓
- *   Return full object
- *
- * ------------------------------------------------------------
+ * DIFFERENCE:
+ *   /profile → JWT payload
+ *   /me      → DB record (source of truth)
  */
 router.get("/me", auth, async (req, res) => {
 
@@ -166,23 +100,24 @@ router.get("/me", auth, async (req, res) => {
     const db = req.app.locals.db;
 
     /**
-     * ✅ Extract company ID from token
+     * ✅ Extract identity
      */
     const { id } = req.company;
 
     /**
-     * ✅ Query database
+     * ✅ Fetch from DB
      */
     const company = await db.collection("companies").findOne({ id });
 
     if (!company) {
       return res.status(404).json({
+        success: false,
         message: "Company not found"
       });
     }
 
     /**
-     * ✅ Remove sensitive fields before returning
+     * 🔐 Remove sensitive fields
      */
     delete company.password;
 
@@ -192,63 +127,51 @@ router.get("/me", auth, async (req, res) => {
     });
 
   } catch (err) {
-
-    res.status(500).json({
-      message: err.message
-    });
-
+    res.status(500).json({ message: "Server error" });
   }
 
 });
 
 
-// ============================================================
-// 🔍 PUBLIC ROUTE: VALIDATE COMPANY (FOR EMPLOYEES)
-// ============================================================
+/* ============================================================
+   🌐 PUBLIC LOOKUP (EMPLOYEE ROUTING LAYER)
+   ============================================================ */
 
 /**
- * ------------------------------------------------------------
- * ✅ ENDPOINT:
+ * ✅ Endpoint:
  *   GET /company/lookup/:name
  *
- * ACCESS:
- *   🌐 Public (no authentication required)
- *
  * PURPOSE:
- *   Allows employees to verify if a company exists
+ *   Allows external actors (employees) to verify company existence
  *
- * USE CASE:
- *   Employee enters company name in mobile app
- *
- * ------------------------------------------------------------
- *
- * 📊 FLOW DIAGRAM:
- *
- *   Employee (App)
- *       ↓
- *   Enter company name
- *       ↓
- *   Request → /lookup/:name
- *       ↓
- *   Server checks DB
- *       ↓
- *   If exists → return success
- *       ↓
- *   Employee proceeds to login in company backend
+ * SECURITY:
+ *   - No sensitive data returned
+ *   - Public safe endpoint
  *
  * ------------------------------------------------------------
+ *
+ * 📊 FLOW:
+ *
+ *   Employee → enter company name
+ *       ↓
+ *   /lookup/:name
+ *       ↓
+ *   DB validation
+ *       ↓
+ *   Minimal response
  */
 router.get("/lookup/:name", async (req, res) => {
 
   try {
 
     const db = req.app.locals.db;
-    const { name } = req.params;
+    const name = req.params.name.trim().toLowerCase();
 
     /**
-     * ✅ Find company by name
+     * ✅ Query DB
      */
-    const company = await db.collection("companies").findOne({ name });
+    const company = await db.collection("companies")
+      .findOne({ name });
 
     if (!company) {
       return res.status(404).json({
@@ -257,49 +180,43 @@ router.get("/lookup/:name", async (req, res) => {
     }
 
     /**
-     * ✅ Return minimal info (no sensitive data)
+     * ✅ Return safe subset only
      */
     res.json({
       exists: true,
       company: {
-        name: company.name,
-        id: company.id
+        id: company.id,
+        name: company.name
       }
     });
 
   } catch (err) {
-
-    res.status(500).json({
-      message: err.message
-    });
-
+    res.status(500).json({ message: "Server error" });
   }
 
 });
 
 
-// ============================================================
-// 🔐 PROTECTED ROUTE: UPDATE COMPANY DATA
-// ============================================================
+/* ============================================================
+   🔐 UPDATE COMPANY (CONTROLLED MUTATION)
+   ============================================================ */
 
 /**
- * ------------------------------------------------------------
- * ✅ ENDPOINT:
+ * ✅ Endpoint:
  *   PUT /company/update
  *
- * ACCESS:
- *   🔐 Protected
- *
  * PURPOSE:
- *   Allows authenticated company to update its data
+ *   Allows company to update allowed fields
  *
- * ------------------------------------------------------------
+ * SECURITY MODEL:
+ *   - Identity from JWT
+ *   - Field whitelist
+ *   - No override of critical fields
  *
- * ⚠️ SECURITY NOTE:
- *   Only allow updates on specific fields
- *   Never allow id or apiKey override
- *
- * ------------------------------------------------------------
+ * PROTECTED FIELDS:
+ *   ❌ id
+ *   ❌ password
+ *   ❌ apiKey
  */
 router.put("/update", auth, async (req, res) => {
 
@@ -311,12 +228,21 @@ router.put("/update", auth, async (req, res) => {
     const { name, email } = req.body;
 
     /**
-     * ✅ Controlled update (whitelist fields only)
+     * ✅ Controlled update (whitelist)
      */
     const updateData = {};
 
     if (name) updateData.name = name;
-    if (email) updateData.email = email;
+    if (email) updateData.email = email.toLowerCase().trim();
+
+    /**
+     * ✅ Prevent empty update
+     */
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        message: "No valid fields provided"
+      });
+    }
 
     await db.collection("companies").updateOne(
       { id },
@@ -329,82 +255,122 @@ router.put("/update", auth, async (req, res) => {
     });
 
   } catch (err) {
-
-    res.status(500).json({
-      message: err.message
-    });
-
+    res.status(500).json({ message: "Server error" });
   }
 
 });
 
 
-// ============================================================
-// 📊 SYSTEM FLOW (COMPLETE VIEW)
-// ============================================================
+/* ============================================================
+   🔐 DELETE COMPANY (SOFT DELETE)
+   ============================================================ */
 
 /**
- * 🔁 COMPANY INTERACTION FLOW:
+ * ✅ Endpoint:
+ *   DELETE /company/delete
  *
- * 1. Company registers
- * 2. Company logs in → gets JWT
- * 3. Company uses JWT to access protected routes
+ * PURPOSE:
+ *   Soft delete company (ability to restore later)
+ */
+router.delete("/delete", auth, async (req, res) => {
+
+  try {
+
+    const db = req.app.locals.db;
+    const { id } = req.company;
+
+    await db.collection("companies").updateOne(
+      { id },
+      { $set: { status: "deleted" } }
+    );
+
+    res.json({
+      success: true,
+      message: "Company deleted (soft)"
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+
+});
+
+
+/* ============================================================
+   📊 SYSTEM FLOW SUMMARY
+   ============================================================ */
+
+/**
+ * 🔁 COMPANY WORKFLOW:
+ *
+ *   Register → Login → Receive JWT
+ *        ↓
+ *   Access protected routes:
+ *       /profile
+ *       /me
+ *       /update
+ *       /delete
  *
  * ------------------------------------------------------------
  *
- * 🔁 EMPLOYEE FLOW:
+ * 🔁 EMPLOYEE WORKFLOW:
  *
- * 1. Employee enters company name
- * 2. /lookup verifies existence
- * 3. App connects employee to company backend
- *
- * ------------------------------------------------------------
- *
- * 🔁 SECURITY FLOW:
- *
- * Request → JWT Verification → Identity Extraction → Access Granted
+ *   Enter company name
+ *        ↓
+ *   /lookup/:name
+ *        ↓
+ *   If exists → route to company backend
  *
  */
 
 
-// ============================================================
-// 🔐 SECURITY ANALYSIS (ACADEMIC LEVEL)
-// ============================================================
+/* ============================================================
+   🔐 SECURITY ANALYSIS (ENTERPRISE LEVEL)
+   ============================================================ */
 
 /**
- * ✅ CORE SECURITY MECHANISMS:
+ * ✅ TRUST MODEL:
  *
- *   - JWT for identity verification
- *   - Middleware isolation
- *   - Data sanitization (remove password)
- *   - Controlled updates
+ *   Client        → Untrusted
+ *   JWT Middleware → Identity Authority
+ *   Routes        → Trusted logic
  *
+ * ------------------------------------------------------------
  *
- * ⚠️ THREATS:
+ * ✅ DEFENSE STRATEGIES:
  *
- *   - Unauthorized access → prevented by JWT
- *   - Data leakage → prevented by field filtering
- *   - Injection → mitigated by structured queries
+ *   - JWT verification (authentication)
+ *   - Field filtering (data protection)
+ *   - Whitelist updates (integrity enforcement)
+ *   - No sensitive data leakage
  *
+ * ------------------------------------------------------------
  *
- * ✅ BEST PRACTICES:
+ * ⚠️ THREAT MITIGATION:
  *
- *   - Always verify identity via middleware
- *   - Never trust req.body for identity
- *   - Keep business logic separate from auth
+ *   Unauthorized access        → auth middleware
+ *   Data tampering             → controlled updates
+ *   Sensitive data exposure    → sanitization
  *
  */
 
 
-// ============================================================
-// 📦 EXPORT ROUTER
-// ============================================================
+/* ============================================================
+   📦 EXPORT
+   ============================================================ */
 
 module.exports = router;
 
 
-/**
+/* ============================================================
+   🏁 END OF FILE
+   ============================================================ */
+
+ /**
+ * 🏢 COMPANY ROUTES MODULE (PROTECTED BUSINESS LOGIC LAYER)
  * ============================================================
- * 🏁 END OF FILE
- * ============================================================
- */
+ *
+ * 🎯 PURPOSE:
+ *
+ * This module represents the "Post-Authentication Business Layer"
+*/

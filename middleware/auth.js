@@ -1,35 +1,53 @@
 /**
  * ============================================================
- * 🔐 JWT AUTHENTICATION MIDDLEWARE
+ * 🔐 JWT AUTHENTICATION MIDDLEWARE (ENTERPRISE SECURITY LAYER)
  * ============================================================
  *
  * 🎯 PURPOSE:
- * This middleware is responsible for validating JSON Web Tokens (JWT)
- * and enforcing authentication across protected API endpoints.
  *
- * It ensures that only authorized entities (companies) can access
- * secured resources within the Attendify backend system.
+ * This middleware enforces authentication using JSON Web Tokens (JWT).
+ * It acts as a **security gatekeeper** for protected API routes.
  *
- * ------------------------------------------------------------
+ * Its responsibilities include:
  *
- * 🧠 CONCEPTUAL OVERVIEW:
- *
- * Authentication is implemented using the Stateless Token-Based Model:
- *
- *   1. Client authenticates (Login)
- *   2. Server issues JWT token
- *   3. Client stores token
- *   4. Client sends token with each request
- *   5. Server verifies token before granting access
+ *   ✅ Extracting authentication credentials
+ *   ✅ Validating token structure and integrity
+ *   ✅ Verifying cryptographic signature
+ *   ✅ Enforcing token expiration
+ *   ✅ Injecting authenticated identity into request lifecycle
  *
  * ------------------------------------------------------------
  *
- * 🔬 SECURITY PRINCIPLES APPLIED:
+ * 🧠 ARCHITECTURAL POSITION:
  *
- *   ✅ Stateless Authentication
- *   ✅ Token Integrity Verification (via signature)
- *   ✅ Minimal Attack Surface
- *   ✅ Separation of Authentication & Business Logic
+ *   CLIENT (Flutter / API Tool)
+ *           ↓
+ *   [ AUTH MIDDLEWARE ]  ← THIS FILE
+ *           ↓
+ *   ROUTE HANDLER
+ *           ↓
+ *   DATABASE
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔬 SECURITY MODEL:
+ *
+ * This implementation follows a **Stateless Token-Based Authentication Model**
+ *
+ *   - No session storage
+ *   - No server-side token persistence
+ *   - Each request is self-authenticated
+ *
+ * ------------------------------------------------------------
+ *
+ * 📊 AUTHENTICATION FLOW (HIGH-LEVEL):
+ *
+ *   LOGIN →
+ *   Generate JWT →
+ *   Client stores token →
+ *   Client sends token →
+ *   Server verifies token →
+ *   Access granted ✅
  *
  * ------------------------------------------------------------
  */
@@ -41,11 +59,7 @@
 
 /**
  * jsonwebtoken:
- * Industry-standard library for signing and verifying JWT tokens
- *
- * Provides:
- *   - token signing (jwt.sign)
- *   - token verification (jwt.verify)
+ * Core library for token signing and verification
  */
 const jwt = require("jsonwebtoken");
 
@@ -55,77 +69,59 @@ const jwt = require("jsonwebtoken");
    ============================================================ */
 
 /**
- * 🧠 MIDDLEWARE ROLE:
+ * ============================================================
+ * FUNCTION: authMiddleware
+ * ============================================================
  *
- * In Express, middleware functions act as "interceptors"
- * that execute BEFORE the final route handler.
+ * PURPOSE:
+ * Validates JWT tokens for protected endpoints
  *
- * Execution Flow:
+ * INPUT:
+ *   req.headers.authorization → "Bearer TOKEN"
  *
- *   Incoming Request
- *          ↓
- *   [ AUTH MIDDLEWARE ]  ← This file
- *          ↓
- *   Route Handler (if access granted)
- *          ↓
- *   Response
+ * OUTPUT:
+ *   - Authorized → request proceeds
+ *   - Unauthorized → 401 response
  *
- */
-
-
-/**
- * ✅ AUTHENTICATION FUNCTION
- *
- * This function enforces access control using JWT
- *
- * @param {Request} req  - Incoming HTTP request
- * @param {Response} res - HTTP response object
- * @param {Function} next - Proceeds to next middleware/handler
+ * ------------------------------------------------------------
  */
 function authMiddleware(req, res, next) {
 
   try {
 
-    /**
-     * ------------------------------------------------------------
-     * 🧠 STEP 1: EXTRACT AUTH HEADER
-     * ------------------------------------------------------------
-     *
-     * Standard HTTP Authorization header format:
-     *
-     *   Authorization: Bearer <token>
-     *
-     * This follows the Bearer Token Authentication Schema
-     * defined in RFC 6750
-     */
+    /* ========================================================
+       🧠 STEP 1: EXTRACT AUTHORIZATION HEADER
+       ======================================================== */
+
     const authHeader = req.headers.authorization;
 
-
     /**
-     * ✅ Validation: Header must exist
+     * Validation Rule:
+     * Header must exist
      */
     if (!authHeader) {
       return res.status(401).json({
+        success: false,
         message: "Authorization header missing"
       });
     }
 
 
+    /* ========================================================
+       🧠 STEP 2: PARSE TOKEN STRUCTURE
+       ======================================================== */
+
     /**
-     * ------------------------------------------------------------
-     * 🧠 STEP 2: PARSE TOKEN
-     * ------------------------------------------------------------
+     * Expected Format:
+     *   "Bearer <token>"
      *
-     * Extract token from "Bearer <token>"
+     * RFC 6750 standard (OAuth 2.0 Bearer Token Usage)
      */
     const parts = authHeader.split(" ");
 
-    /**
-     * Validation:
-     * Must follow format: ["Bearer", "token"]
-     */
     if (parts.length !== 2 || parts[0] !== "Bearer") {
       return res.status(401).json({
+        success: false,
         message: "Invalid authorization format"
       });
     }
@@ -133,57 +129,67 @@ function authMiddleware(req, res, next) {
     const token = parts[1];
 
 
+    /* ========================================================
+       🧠 STEP 3: VERIFY TOKEN (CRYPTOGRAPHIC)
+       ======================================================== */
+
     /**
-     * ------------------------------------------------------------
-     * 🧠 STEP 3: VERIFY TOKEN
-     * ------------------------------------------------------------
-     *
      * jwt.verify performs:
-     *   ✅ Signature validation
-     *   ✅ Expiration validation
-     *   ✅ Payload integrity check
      *
-     * If token is tampered or expired → exception thrown
+     *   ✅ Signature verification (HMAC SHA256)
+     *   ✅ Expiration validation (exp)
+     *   ✅ Integrity check (payload hash)
+     *
+     * If any check fails → throws exception
      */
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
 
+    /* ========================================================
+       🧠 STEP 4: ATTACH AUTH CONTEXT
+       ======================================================== */
+
     /**
-     * ------------------------------------------------------------
-     * 🧠 STEP 4: ATTACH DECODED DATA TO REQUEST
-     * ------------------------------------------------------------
+     * Inject authenticated entity into request object
      *
-     * This allows downstream handlers to access user/company info
-     *
-     * Example:
+     * This enables downstream access control:
      *   req.company.id
      *   req.company.email
      */
-    req.company = decoded;
+    req.company = {
+      id: decoded.id,
+      email: decoded.email
+    };
 
+
+    /* ========================================================
+       🧠 STEP 5: CONTINUE PIPELINE
+       ======================================================== */
 
     /**
-     * ✅ Proceed to next layer
-     *
-     * Without calling next(), request will stall
+     * Continue execution chain
      */
     next();
 
   } catch (err) {
 
+    /* ========================================================
+       🛑 ERROR HANDLING (SECURE RESPONSE)
+       ======================================================== */
+
     /**
-     * ------------------------------------------------------------
-     * 🛑 ERROR HANDLING SECTION
-     * ------------------------------------------------------------
-     *
-     * jwt.verify throws errors such as:
+     * Error Types:
      *
      *   - TokenExpiredError
      *   - JsonWebTokenError
+     *   - NotBeforeError
      *
-     * We standardize response to prevent information leakage
+     * Strategy:
+     *   - Do NOT leak internal details
+     *   - Return unified error message
      */
     return res.status(401).json({
+      success: false,
       message: "Unauthorized access (invalid or expired token)"
     });
   }
@@ -191,88 +197,92 @@ function authMiddleware(req, res, next) {
 
 
 /* ============================================================
-   📊 TOKEN VALIDATION FLOW DIAGRAM
+   📊 DETAILED AUTH FLOW DIAGRAM
    ============================================================ */
 
 /**
- * 🔁 FULL AUTHENTICATION FLOW
+ * CLIENT SIDE:
+ * ──────────────────────────────────────────
  *
- *   CLIENT SIDE:
- *   ───────────────────────────────────────
  *   1. User logs in
- *   2. Receives JWT token
+ *   2. Receives JWT
  *   3. Sends request:
- *      Authorization: Bearer TOKEN
  *
- *   ───────────────────────────────────────
+ *        Authorization: Bearer TOKEN
  *
- *   SERVER SIDE (THIS FILE):
+ * ──────────────────────────────────────────
  *
- *                Incoming Request
- *                        ↓
- *       Extract Authorization Header
- *                        ↓
- *         Validate Header Format
- *                        ↓
- *           Extract JWT Token
- *                        ↓
- *            Verify Signature
- *                        ↓
- *          Verify Expiration Time
- *                        ↓
- *           Attach User Context
- *                        ↓
- *                  next()
- *                        ↓
- *             Protected Route Handler
+ * SERVER SIDE (THIS FILE):
  *
- * ------------------------------------------------------------
+ *   Incoming Request
+ *        ↓
+ *   Extract Authorization Header
+ *        ↓
+ *   Validate Header Format
+ *        ↓
+ *   Extract Token
+ *        ↓
+ *   Verify Token Signature
+ *        ↓
+ *   Verify Expiration (exp)
+ *        ↓
+ *   Decode Payload
+ *        ↓
+ *   Attach req.company
+ *        ↓
+ *   next()
+ *        ↓
+ *   Protected Route
+ *
  */
 
 
 /* ============================================================
-   🔐 SECURITY ANALYSIS (ACADEMIC)
+   🔐 ADVANCED SECURITY ANALYSIS
    ============================================================ */
 
 /**
- * 🔬 JWT SECURITY MODEL:
+ * 🔬 JWT STRUCTURE:
  *
- * A JWT consists of three parts:
- *
- *   header.payload.signature
+ *   HEADER.PAYLOAD.SIGNATURE
  *
  * Example:
  *   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
  *
+ * ------------------------------------------------------------
  *
- * ✅ Advantages:
+ * ✅ ADVANTAGES:
  *
- *   - Stateless (No session storage)
- *   - Scalable (Horizontal scaling)
- *   - Self-contained (includes payload)
- *
- *
- * ⚠️ Known Risks:
- *
- *   - Token theft (Mitigation: HTTPS)
- *   - No immediate revocation
- *
- *
- * ✅ Mitigations:
- *
- *   - Use HTTPS always
- *   - Use expiration (exp claim)
- *   - Rotate secrets
- *
+ *   - Stateless architecture
+ *   - Horizontal scalability
+ *   - Minimal server overhead
  *
  * ------------------------------------------------------------
  *
- * 🔒 SECURITY BEST PRACTICES:
+ * ⚠️ SECURITY RISKS:
  *
- *   ✅ NEVER expose JWT_SECRET
- *   ✅ Use strong random secret
- *   ✅ Use short expiration time for sensitive systems
- *   ✅ Combine JWT with API gateway layer (Cloudflare Worker)
+ *   1. Token Theft
+ *   2. Replay Attacks
+ *   3. No built-in revocation
+ *
+ * ------------------------------------------------------------
+ *
+ * ✅ MITIGATIONS:
+ *
+ *   - Always use HTTPS
+ *   - Use short expiration times
+ *   - Store token securely in client
+ *   - Rotate JWT_SECRET periodically
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔐 TRUST BOUNDARY MODEL:
+ *
+ *   Client (UNTRUSTED)
+ *        ↓
+ *   Middleware (VALIDATION LAYER)
+ *        ↓
+ *   Application Logic (TRUSTED)
  *
  */
 
@@ -281,14 +291,6 @@ function authMiddleware(req, res, next) {
    📦 EXPORT MODULE
    ============================================================ */
 
-/**
- * Export middleware for use in routes
- *
- * Example usage:
- *
- *   const auth = require("./middleware/auth");
- *   app.get("/protected", auth, handler);
- */
 module.exports = authMiddleware;
 
 

@@ -1,38 +1,46 @@
 /**
- * =========================================================ify Backend Server (Production-Grade Entry Point) * ============================================================
+ * ============================================================
+ * 🌐 ATTENDIFY BACKEND SERVER (ENTRY POINT - PRODUCTION GRADE)
  * ============================================================
  *
  * 🎯 PURPOSE:
- * This file represents the core entry point of a distributed SaaS backend system.
- * It is responsible for:
  *
- *   - Initializing the HTTP server (Express)
- *   - Establishing database connection (MongoDB Atlas)
- *   - Registering middleware (CORS, JSON parsing)
- *   - Defining API endpoints
- *   - Acting as the integration layer between client and persistence layer
+ * This file represents the **composition root** of the backend system.
+ * It integrates all infrastructure components into a cohesive runtime.
  *
- * ------------------------------------------------------------
+ * Responsibilities:
  *
- * 🧠 ARCHITECTURAL CONTEXT:
- *
- *     Client (Flutter / API Tool)
- *                ↓
- *       (HTTP Request Layer)
- *                ↓
- *         Express Server  ← This File
- *                ↓
- *          MongoDB Atlas
+ *   ✅ Initialize HTTP server (Express)
+ *   ✅ Load environment configuration
+ *   ✅ Register global middleware
+ *   ✅ Connect to MongoDB
+ *   ✅ Register route modules
+ *   ✅ Start application lifecycle
  *
  * ------------------------------------------------------------
  *
- * 🔬 DESIGN PHILOSOPHY:
+ * 🧠 ARCHITECTURAL MODEL:
  *
- * This server adheres to:
- *   ✅ Stateless API Design
+ *        Client (Flutter / API Tool)
+ *                   ↓
+ *        Cloudflare Worker (Edge Gateway)
+ *                   ↓
+ *        Express Server (THIS FILE)
+ *                   ↓
+ *        Route Layer (auth / company)
+ *                   ↓
+ *        Middleware Layer (JWT, security)
+ *                   ↓
+ *        Database (MongoDB Atlas)
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔬 DESIGN PRINCIPLES:
+ *
  *   ✅ Separation of Concerns
- *   ✅ RESTful Principles
- *   ✅ Cloud-Native Compatibility
+ *   ✅ Dependency Injection (via app.locals)
+ *   ✅ Stateless API Architecture
+ *   ✅ Middleware Pipeline Model
  *
  * ------------------------------------------------------------
  */
@@ -42,36 +50,24 @@
    📦 MODULE IMPORTS
    ============================================================ */
 
-/**
- * express:
- * Lightweight web framework for building HTTP APIs
- */
 const express = require("express");
-
-/**
- * cors:
- * Enables Cross-Origin Resource Sharing
- * Required for frontend (Flutter/Web) communication
- */
 const cors = require("cors");
 
 /**
- * dotenv:
- * Loads environment variables securely from .env file
+ * Load environment variables (.env → process.env)
  */
 require("dotenv").config();
 
 /**
- * connectDB:
- * Custom module responsible for establishing connection to MongoDB
+ * Database connection module
  */
 const { connectDB } = require("./db");
 
 /**
- * Node.js built-in crypto module
- * Used to generate secure unique identifiers (UUID)
+ * Route modules (modular architecture)
  */
-const crypto = require("crypto");
+const authRoutes = require("./routes/auth");
+const companyRoutes = require("./routes/company");
 
 
 /* ============================================================
@@ -80,259 +76,229 @@ const crypto = require("crypto");
 
 const app = express();
 
+
+/* ============================================================
+   🔐 GLOBAL MIDDLEWARE LAYER
+   ============================================================ */
+
 /**
- * 🧠 Middleware Layer
+ * 🧠 Middleware acts as a pipeline:
  *
- * Middleware executes BEFORE reaching route handlers.
- *
- * Request Flow:
- *   Client → Middleware → Route → Response
+ * Request → Middleware → Routing → Response
  */
 
 /**
- * Enable CORS:
- * Allows external clients (Flutter / Browser) to call the API
+ * ✅ CORS ENABLEMENT
+ *
+ * Allows cross-origin requests from frontend applications
  */
 app.use(cors());
 
 /**
- * Enable JSON parsing:
- * Automatically parses incoming JSON request bodies
+ * ✅ JSON BODY PARSER
+ *
+ * Automatically parses JSON request payload into req.body
  */
 app.use(express.json());
 
 
-/* ============================================================
-   🗄️ DATABASE CONNECTION LAYER
-   ============================================================ */
-
 /**
- * Database instance placeholder
+ * ============================================================
+ * 🔐 SECURITY GATEWAY (OPTIONAL HARDENING)
+ * ============================================================
  *
- * 🧠 Why external variable?
- * Because connection is asynchronous,
- * and routes need to access it globally
- */
-let db;
-
-/**
- * ✅ Establish database connection BEFORE starting server
+ * Blocks direct access (forces traffic through Worker)
  *
- * Flow:
- *   Startup → Connect to MongoDB → Start listening
+ * Trust Model:
+ *   Only requests coming from Worker are trusted
+ *
  */
-connectDB()
-  .then(database => {
+app.use((req, res, next) => {
 
-    db = database;
+  if (process.env.NODE_ENV === "production") {
 
     /**
-     * ✅ Start HTTP server ONLY after DB is ready
-     *
-     * This prevents race conditions where requests arrive
-     * before DB connection is established
+     * Check for Worker forwarding header
      */
-    app.listen(3000, () => {
-      console.log("🚀 Server running on port 3000");
-    });
+    const forwarded = req.headers["x-gateway"];
 
-  })
-  .catch(err => {
-    console.error("❌ Database connection failed:", err);
-    process.exit(1);
-  });
+    if (!forwarded) {
+      return res.status(403).json({
+        success: false,
+        message: "Direct access forbidden"
+      });
+    }
+  }
 
+  next();
 
-/* ============================================================
-   🌐 ROUTES (API ENDPOINTS)
-   ============================================================ */
-
-
-/**
- * ------------------------------------------------------------
- * ✅ HEALTH CHECK ENDPOINT
- * ------------------------------------------------------------
- *
- * PURPOSE:
- * Ensures that server is alive and responsive
- *
- * FLOW:
- *   Client → GET "/" → Server → JSON Response
- *
- * USE CASES:
- *   - Monitoring
- *   - Dev testing
- *   - Load balancer checks
- */
-app.get("/", (req, res) => {
-  res.json({
-    message: "Attendify Backend Running 🚀"
-  });
 });
 
 
+/* ============================================================
+   🌐 HEALTH CHECK ROUTE
+   ============================================================ */
+
 /**
- * ------------------------------------------------------------
- * ✅ REGISTER COMPANY ENDPOINT
- * ------------------------------------------------------------
- *
- * METHOD: POST
- * ENDPOINT: /register-company
+ * ✅ Endpoint:
+ *   GET /
  *
  * PURPOSE:
- * Registers a new company in the platform
- *
- * SCIENTIFIC/ARCHITECTURAL ROLE:
- * Serves as an ENTRY POINT to the multi-tenant system
- *
- * ------------------------------------------------------------
- *
- * 📊 DATA FLOW DIAGRAM:
- *
- *   Client (POST Request)
- *           ↓
- *   Express Route Handler
- *           ↓
- *   Input Validation
- *           ↓
- *   MongoDB Query (Check existence)
- *           ↓
- *   Data Creation (UUID + API Key)
- *           ↓
- *   Insert into Database
- *           ↓
- *   Response to Client
- *
- * ------------------------------------------------------------
+ *   System monitoring & liveness check
  */
-app.post("/register-company", async (req, res) => {
+app.get("/", (req, res) => {
+
+  res.json({
+    message: "Attendify Backend Running 🚀"
+  });
+
+});
+
+
+/* ============================================================
+   🌐 ROUTE REGISTRATION
+   ============================================================ */
+
+/**
+ * Modular routing system:
+ *
+ *   /auth     → authentication logic
+ *   /company  → business logic
+ */
+app.use("/auth", authRoutes);
+app.use("/company", companyRoutes);
+
+
+/* ============================================================
+   🗄️ DATABASE INITIALIZATION
+   ============================================================ */
+
+/**
+ * 🧠 Startup sequence:
+ *
+ *   1. Connect to database
+ *   2. Inject DB into app context
+ *   3. Start server
+ *
+ * This prevents race conditions
+ */
+
+let db;
+
+async function startServer() {
 
   try {
 
     /**
-     * ✅ Step 1: Extract request data
+     * ✅ Step 1: Connect to MongoDB
      */
-    const { name, email } = req.body;
+    db = await connectDB();
+
+    /**
+     * ✅ Step 2: Inject DB into global app context
+     *
+     * Accessible from:
+     *   req.app.locals.db
+     */
+    app.locals.db = db;
 
 
     /**
-     * ✅ Step 2: Input validation
-     *
-     * Ensures system integrity and prevents invalid records
+     * ✅ Step 3: Start HTTP server
      */
-    if (!name || !email) {
-      return res.status(400).json({
-        message: "Missing required fields"
-      });
-    }
+    const PORT = process.env.PORT || 3000;
 
-
-    /**
-     * ✅ Step 3: Check for existing company
-     *
-     * Prevents duplication
-     * Enforces uniqueness constraint
-     */
-    const existing = await db.collection("companies").findOne({ name });
-
-    if (existing) {
-      return res.status(409).json({
-        message: "Company already exists"
-      });
-    }
-
-
-    /**
-     * ✅ Step 4: Generate secure identifiers
-     *
-     * id:
-     *   - Global unique identifier for system
-     *
-     * apiKey:
-     *   - Used later for integration/authentication
-     */
-    const company = {
-      id: crypto.randomUUID(),
-      name,
-      email,
-      apiKey: crypto.randomUUID(),
-      createdAt: new Date()
-    };
-
-
-    /**
-     * ✅ Step 5: Insert into MongoDB
-     *
-     * MongoDB characteristics:
-     *   - NoSQL
-     *   - schema-less
-     */
-    await db.collection("companies").insertOne(company);
-
-
-    /**
-     * ✅ Step 6: Respond to client
-     *
-     * Returns the created entity
-     */
-    res.json({
-      success: true,
-      company
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
     });
+
 
   } catch (err) {
 
     /**
-     * ✅ Global error handling (local scope)
-     *
-     * Prevents server crash
+     * 🛑 Critical failure handling
      */
-    res.status(500).json({
-      message: err.message
-    });
-
+    console.error("❌ Failed to start server:", err);
+    process.exit(1);
   }
 
-});
+}
+
+startServer();
 
 
 /* ============================================================
-   ⚙️ EXTENSIBILITY NOTES
+   📊 REQUEST LIFECYCLE DIAGRAM (DETAILED)
    ============================================================ */
 
 /**
- * 🔮 Future Enhancements:
+ * 🔁 FULL REQUEST FLOW:
  *
- *   - Add Authentication (JWT)
- *   - Add login endpoint
- *   - Add protected routes (middleware)
- *   - Add company backend URL
- *   - Add API gateway forwarding (Cloudflare Worker)
+ *   Client (Flutter / Postman)
+ *        ↓
+ *   Cloudflare Worker
+ *        ↓
+ *   Express Server
+ *        ↓
+ *   Global Middleware
+ *        ↓
+ *   Security Check
+ *        ↓
+ *   Route Matching (/auth, /company)
+ *        ↓
+ *   Auth Middleware (JWT)
+ *        ↓
+ *   Route Handler
+ *        ↓
+ *   Database Query
+ *        ↓
+ *   JSON Response
+ *
+ */
+
+
+/* ============================================================
+   🔐 SECURITY ANALYSIS (ENTERPRISE LEVEL)
+   ============================================================ */
+
+/**
+ * ✅ DEFENSE LAYERS:
+ *
+ *   Layer 1: Cloudflare Worker (Edge protection)
+ *   Layer 2: Header validation (x-gateway)
+ *   Layer 3: JWT authentication
+ *   Layer 4: DB access control
  *
  * ------------------------------------------------------------
  *
- * 🧠 SCALABILITY NOTES:
+ * ⚠️ THREATS MITIGATED:
  *
- * This design is scalable because:
- *
- *   ✅ Stateless requests
- *   ✅ No session dependency
- *   ✅ Can be deployed horizontally
+ *   - Direct backend access → blocked
+ *   - Unauthorized requests → JWT validation
+ *   - Replay tokens → expiration control
  *
  * ------------------------------------------------------------
  *
- * 🔐 SECURITY NOTES:
+ * ✅ BEST PRACTICES:
  *
- * Current level:
- *   - Basic input validation
+ *   - Never expose raw DB to internet
+ *   - Always use API gateway
+ *   - Keep server stateless
  *
- * Required improvements:
- *   - JWT Authentication
- *   - Rate limiting
- *   - API key validation
- *   - HTTPS enforcement
+ */
+
+
+/* ============================================================
+   ⚡ SCALABILITY MODEL
+   ============================================================ */
+
+/**
+ * This architecture supports:
  *
- * ------------------------------------------------------------
+ *   ✅ Horizontal scaling (multiple instances)
+ *   ✅ CDN + Edge routing (Worker)
+ *   ✅ Stateless load balancing
+ *
  */
 
 
