@@ -1,100 +1,111 @@
 /**
- * ============================================================
- * 🔐 PASSWORD HASHING UTILITY MODULE (CRYPTANALYTIC COMPONENT)
+ * ========================================================= 🔐 PASSWORD HASHING UTILITY MODULE (CRYPTOGRAPHIC SECURITY LAYER) * ============================================================
  * ============================================================
  *
  * 🎯 PURPOSE:
  *
- * This module provides a secure abstraction layer for handling
- * password hashing and verification using modern cryptographic
- * standards.
+ * This module provides a fully abstracted, secure, and reusable
+ * implementation for password hashing and verification.
  *
- * It implements:
+ * It encapsulates cryptographic operations to ensure:
  *
- *   ✅ Password hashing (one-way transformation)
- *   ✅ Password verification (secure comparison)
- *
- * ------------------------------------------------------------
- *
- * 🧠 BACKGROUND:
- *
- * Passwords MUST NOT be stored in plaintext.
- *
- * Instead, we store:
- *
- *   HASH(password + salt)
+ *   ✅ Secure password storage (one-way transformation)
+ *   ✅ Safe password comparison (constant-time)
+ *   ✅ Centralized cryptographic control
  *
  * ------------------------------------------------------------
  *
- * 🔬 CRYPTOGRAPHIC MODEL:
+ * 🧠 ARCHITECTURAL ROLE:
  *
- * The system uses bcrypt, a key derivation function (KDF)
- * specifically designed for password hashing.
- *
- * Properties of bcrypt:
- *
- *   ✅ Adaptive (cost factor adjustable)
- *   ✅ Salted hashing (prevents rainbow tables)
- *   ✅ Slow computation (resists brute-force attacks)
+ *   Application Layer (Routes)
+ *           ↓
+ *   Hash Utility Layer  ← THIS FILE
+ *           ↓
+ *   Cryptographic Engine (bcrypt)
  *
  * ------------------------------------------------------------
  *
- * 🧬 HIGH-LEVEL PASSWORD FLOW:
+ * 🔬 CRYPTOGRAPHIC FOUNDATION:
  *
- *   USER INPUT PASSWORD
- *           ↓
- *   bcrypt.generateSalt()
- *           ↓
- *   bcrypt.hash(password + salt)
- *           ↓
- *   Store HASH in database
+ * The system utilizes bcrypt:
+ *
+ *   - Key Derivation Function (KDF)
+ *   - Designed for password hashing (NOT general hashing)
+ *   - Resistant to GPU/ASIC brute-force attacks
  *
  * ------------------------------------------------------------
  *
- * 🧬 VERIFICATION FLOW:
+ * 📊 HIGH-LEVEL PASSWORD STORAGE MODEL:
  *
- *   USER INPUT PASSWORD
+ *      Plain Password
  *           ↓
- *   Retrieve stored HASH
+ *      Validate Input
  *           ↓
- *   bcrypt.compare(input, hash)
+ *      Generate Salt
  *           ↓
- *   Boolean result (true / false)
+ *      bcrypt(password + salt)
+ *           ↓
+ *      Store Hashed Output
+ *
+ * ------------------------------------------------------------
+ *
+ * 📊 VERIFICATION MODEL:
+ *
+ *      Input Password
+ *           ↓
+ *      Retrieve Stored Hash
+ *           ↓
+ *      bcrypt.compare()
+ *           ↓
+ *      Boolean Result (true / false)
  *
  * ------------------------------------------------------------
  */
 
 
-// ============================================================
-// 📦 MODULE IMPORT
-// ============================================================
+/* ============================================================
+   📦 MODULE IMPORT
+   ============================================================ */
 
 /**
  * bcryptjs:
+ * Pure JavaScript implementation of bcrypt
  *
- * JavaScript implementation of bcrypt.
  * Provides:
- *   - secure hashing
- *   - salt generation
- *   - password comparison
- *
- * Note:
- * bcryptjs is CPU-bound, designed to be intentionally slow.
+ *   - Salt generation
+ *   - Hashing
+ *   - Secure comparison
  */
 const bcrypt = require("bcryptjs");
 
 
-// ============================================================
-// 🔐 HASH PASSWORD FUNCTION
-// ============================================================
+/* ============================================================
+   ⚙️ CONFIGURATION
+   ============================================================ */
+
+/**
+ * Computational cost factor
+ *
+ * Higher value → more secure, slower
+ *
+ * Default range:
+ *   10 → good balance (production standard)
+ *   12+ → high security environments
+ */
+const SALT_ROUNDS = parseInt(process.env.SALT_ROUNDS) || 10;
+
+
+/* ============================================================
+   🔐 HASH PASSWORD FUNCTION
+   ============================================================ */
 
 /**
  * ============================================================
- * 🔐 FUNCTION: hashPassword
+ * FUNCTION: hashPassword
  * ============================================================
  *
  * PURPOSE:
- *   Converts a plaintext password into a secure hashed form
+ *   Converts plaintext password into a secure hash
  *
  * PARAMETERS:
  *   @param {string} password
@@ -104,165 +115,180 @@ const bcrypt = require("bcryptjs");
  *
  * ------------------------------------------------------------
  *
- * 🔬 INTERNAL STEPS:
+ * 📊 FLOW:
  *
- *   1. Generate cryptographic salt
- *   2. Combine salt with password
- *   3. Apply bcrypt hashing algorithm
- *
- * ------------------------------------------------------------
- *
- * 📊 FLOW DIAGRAM:
- *
- *   Plain Password
- *        ↓
- *   Generate Salt (random)
- *        ↓
- *   Combine Password + Salt
- *        ↓
- *   Apply Hash Function (bcrypt)
- *        ↓
- *   Return Hashed Output
- *
- * ------------------------------------------------------------
- *
- * 🧠 SECURITY NOTES:
- *
- *   - Salt ensures uniqueness of hashes
- *   - Even identical passwords generate different hashes
- *   - Protects against rainbow table attacks
+ *   Input Password
+ *         ↓
+ *   Validation Layer
+ *         ↓
+ *   Salt Generation (bcrypt.genSalt)
+ *         ↓
+ *   Hash Computation (bcrypt.hash)
+ *         ↓
+ *   Return Hash
  *
  * ------------------------------------------------------------
  */
 async function hashPassword(password) {
 
-  const saltRounds = 10; // Adjustable computational cost
+  /* ========================================================
+     🧠 STEP 1: INPUT VALIDATION
+     ======================================================== */
+
+  if (typeof password !== "string" || password.length < 6) {
+    throw new Error("Password must be a string with at least 6 characters");
+  }
+
+
+  /* ========================================================
+     🧠 STEP 2: SALT GENERATION
+     ======================================================== */
 
   /**
-   * Step 1: Generate Salt
+   * Salt adds randomness to hashing process
+   * Prevents identical hashes for identical passwords
    */
-  const salt = await bcrypt.genSalt(saltRounds);
+  const salt = await bcrypt.genSalt(SALT_ROUNDS);
 
-  /**
-   * Step 2: Generate Hash
-   */
+
+  /* ========================================================
+     🔐 STEP 3: HASH COMPUTATION
+     ======================================================== */
+
   const hash = await bcrypt.hash(password, salt);
 
-  /**
-   * Step 3: Return Hash
-   */
+
+  /* ========================================================
+     📤 STEP 4: RETURN HASH
+     ======================================================== */
+
   return hash;
 }
 
 
-// ============================================================
-// 🔐 COMPARE PASSWORD FUNCTION
-// ============================================================
+/* ============================================================
+   🔐 COMPARE PASSWORD FUNCTION
+   ============================================================ */
 
 /**
  * ============================================================
- * 🔐 FUNCTION: comparePassword
+ * FUNCTION: comparePassword
  * ============================================================
  *
  * PURPOSE:
- *   Verifies whether a plaintext password matches a stored hash
+ *   Verifies if plaintext password matches stored hash
  *
  * PARAMETERS:
- *   @param {string} password - user input
- *   @param {string} hashed   - stored hash
+ *   @param {string} password
+ *   @param {string} hashed
  *
  * RETURNS:
- *   @returns {boolean} true if match, false otherwise
+ *   @returns {boolean}
  *
  * ------------------------------------------------------------
  *
- * 📊 FLOW DIAGRAM:
+ * 📊 FLOW:
  *
  *   Input Password
- *         ↓
+ *        ↓
  *   Retrieve Stored Hash
- *         ↓
- *   Extract Salt
- *         ↓
- *   Hash Input Using Same Salt
- *         ↓
- *   Compare Results
- *         ↓
- *   Return true / false
- *
- * ------------------------------------------------------------
- *
- * 🧠 SECURITY NOTES:
- *
- *   - Resistant to timing attacks
- *   - No direct password comparison used
- *   - Ensures safe authentication
+ *        ↓
+ *   bcrypt.compare()
+ *        ↓
+ *   Secure Comparison
+ *        ↓
+ *   true / false
  *
  * ------------------------------------------------------------
  */
 async function comparePassword(password, hashed) {
 
+  /* ========================================================
+     🧠 INPUT VALIDATION
+     ======================================================== */
+
+  if (typeof password !== "string" || typeof hashed !== "string") {
+    throw new Error("Invalid input types for password comparison");
+  }
+
+
+  /* ========================================================
+     🔐 SECURE COMPARISON
+     ======================================================== */
+
+  /**
+   * bcrypt.compare performs:
+   *
+   *   - Re-hashing using stored salt
+   *   - Constant-time comparison (resists timing attacks)
+   */
   return await bcrypt.compare(password, hashed);
 }
 
 
-// ============================================================
-// 📊 CRYPTOGRAPHIC ANALYSIS (ACADEMIC)
-// ============================================================
+/* ============================================================
+   🔬 CRYPTOGRAPHIC ANALYSIS (ACADEMIC SECTION)
+   ============================================================ */
 
 /**
- * 🔬 WHY BCRYPT?
+ * 🔬 WHY NOT SHA256?
  *
- * Traditional hashing (e.g., SHA256) is NOT suitable for passwords
- * because it is:
+ * Traditional hashing algorithms (SHA256, MD5):
  *
- *   ❌ Too fast (vulnerable to brute-force attacks)
- *
- * bcrypt solves this by:
- *
- *   ✅ Adding computational cost (deliberately slow)
- *   ✅ Using salts (prevents precomputed attacks)
+ *   ❌ Too fast (vulnerable to brute-force)
+ *   ❌ No built-in salt
  *
  * ------------------------------------------------------------
  *
- * 🔐 SECURITY LAYERS PROVIDED:
+ * ✅ WHY BCRYPT:
  *
- *   Layer 1: Salt (randomization)
- *   Layer 2: Hashing (one-way transformation)
- *   Layer 3: Cost factor (time complexity)
+ *   ✅ Adaptive cost factor (configurable complexity)
+ *   ✅ Built-in salt generation
+ *   ✅ Designed specifically for passwords
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔐 SECURITY LAYERS:
+ *
+ *   Layer 1: Input validation
+ *   Layer 2: Salt randomness
+ *   Layer 3: Hash computational cost
  *
  * ------------------------------------------------------------
  *
  * ⚠️ THREAT MODEL:
  *
- *   Threat: Database leak
- *   → Passwords remain protected (hashed)
+ *   Threat: Database breach
+ *     → Mitigation: passwords are hashed
  *
- *   Threat: Rainbow tables
- *   → Prevented by salt
+ *   Threat: Rainbow table attacks
+ *     → Mitigation: unique salt per password
  *
- *   Threat: Brute-force attack
- *   → Mitigated by slow hashing
+ *   Threat: Brute-force attacks
+ *     → Mitigation: slow hashing (cost factor)
  *
  * ------------------------------------------------------------
  *
  * ✅ BEST PRACTICES:
  *
- *   - Never store plaintext passwords
- *   - Always hash before storage
- *   - Use strong cost factor
- *   - Combine with HTTPS + JWT
+ *   - Always hash passwords before storage
+ *   - Never log passwords or hashes
+ *   - Use environment-configurable cost factor
  *
  */
 
 
-// ============================================================
-// 📦 EXPORT MODULE
-// ============================================================
+/* ============================================================
+   📦 EXPORT
+   ============================================================ */
 
 module.exports = {
   hashPassword,
   comparePassword
 };
 
+
+/* ============================================================
+   🏁 END OF FILE
+   ============================================================ */
 
