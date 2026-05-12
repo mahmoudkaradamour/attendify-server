@@ -1,46 +1,46 @@
 /**
  * ============================================================
- * 🌐 ATTENDIFY BACKEND SERVER (COMPOSITION ROOT - FULL SYSTEM)
+ * 🌐 ATTENDIFY BACKEND SERVER (SECURE COMPOSITION ROOT)
  * ============================================================
  *
  * 🎯 PURPOSE:
  *
- * This module acts as the central orchestration layer of the backend.
- * It composes all subsystems into a single runtime unit.
- *
- * Responsibilities:
- *
- *   ✅ Bootstrapping Express application
- *   ✅ Loading environment configuration (.env)
- *   ✅ Initializing global middleware pipeline
- *   ✅ Connecting to MongoDB (persistent layer)
- *   ✅ Registering modular route controllers
- *   ✅ Starting HTTP listener with correct network binding
+ * This module represents the **Composition Root** of the system,
+ * where all infrastructure components are initialized and wired together.
  *
  * ------------------------------------------------------------
  *
- * 🧠 SYSTEM ARCHITECTURE FLOW:
+ * 🧠 ARCHITECTURAL OVERVIEW:
  *
- *    Client (App / Postman / Browser)
- *              ↓
- *    Edge Layer (Cloudflare Worker)
- *              ↓
- *    Express Server (THIS FILE)
- *              ↓
- *    Middleware Pipeline (CORS, Auth, Security)
- *              ↓
- *    Route Controllers (/auth, /company)
- *              ↓
- *    Database Layer (MongoDB)
+ *   Client (Flutter App / API Tool)
+ *                ↓
+ *   Cloudflare Worker (Edge Gateway)
+ *                ↓
+ *   Express Backend (THIS FILE)
+ *                ↓
+ *   Route Layer (/auth, /company)
+ *                ↓
+ *   Middleware (JWT, Validation)
+ *                ↓
+ *   MongoDB (Persistence Layer)
  *
  * ------------------------------------------------------------
  *
  * 🔬 DESIGN PRINCIPLES:
  *
- *   ✅ Composition Root Pattern
- *   ✅ Middleware Pipeline Architecture
- *   ✅ Stateless RESTful Design
- *   ✅ Dependency Injection via app.locals
+ *   ✅ Separation of Concerns
+ *   ✅ Zero-Trust Architecture
+ *   ✅ Stateless API Design
+ *   ✅ Middleware Pipeline Pattern
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔐 SECURITY MODEL:
+ *
+ *   Layer 1 → Cloudflare Worker (Edge Filtering)
+ *   Layer 2 → Secret Header Validation (Gateway Lock)
+ *   Layer 3 → JWT Authentication (User Identity)
+ *   Layer 4 → Database Access Control
  *
  * ------------------------------------------------------------
  */
@@ -52,19 +52,20 @@
 
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 
 /**
- * Load environment variables into process.env
+ * Load environment variables from .env into process.env
  */
 require("dotenv").config();
 
 /**
- * Database connection module
+ * Database connector (MongoDB)
  */
 const { connectDB } = require("./db");
 
 /**
- * Route modules
+ * Modular route handlers
  */
 const authRoutes = require("./routes/auth");
 const companyRoutes = require("./routes/company");
@@ -82,77 +83,112 @@ const app = express();
    ============================================================ */
 
 /**
- * 📊 REQUEST FLOW:
+ * 🧠 Middleware is executed sequentially:
  *
- *   Incoming Request
- *        ↓
- *   CORS Middleware
- *        ↓
+ *   Incoming Request →
+ *      ↓
+ *   Security Middleware
+ *      ↓
  *   JSON Parser
- *        ↓
- *   Security Layer
- *        ↓
+ *      ↓
  *   Route Matching
+ *      ↓
+ *   Response
  */
 
+/**
+ * ✅ Security headers (Helmet)
+ *
+ * Prevents:
+ *   - Clickjacking
+ *   - XSS attacks
+ *   - MIME sniffing
+ */
+app.use(helmet());
+
+/**
+ * ✅ Disable Server Fingerprinting
+ *
+ * Removes:
+ *   X-Powered-By: Express
+ */
+app.disable("x-powered-by");
+
+/**
+ * ✅ Enable CORS
+ */
 app.use(cors());
+
+/**
+ * ✅ Parse JSON request bodies
+ */
 app.use(express.json());
 
 
+/* ============================================================
+   🔐 ZERO-TRUST SECURITY GATEWAY
+   ============================================================ */
+
 /**
- * ============================================================
- * 🔐 SECURITY GATEWAY (CONTROLLED ACCESS)
- * ============================================================
+ * 🎯 PURPOSE:
+ *   Enforce that ONLY trusted Edge Gateway (Cloudflare Worker)
+ *   can communicate with this backend service.
  *
- * PURPOSE:
- *   Prevent direct backend exposure in production
+ * 🔬 THEORY:
  *
- * STRATEGY:
- *   Allow:
- *     ✅ Health check (/)
- *     ✅ Development mode
- *     ✅ Requests from trusted gateway (Worker)
+ * This implements a "Shared Secret Authentication" between:
  *
- * BLOCK:
- *     ❌ Untrusted direct external requests
+ *   Worker ↔ Backend
+ *
+ * The backend **rejects any direct request** that does not
+ * contain a valid secret.
  *
  * ------------------------------------------------------------
  *
  * 📊 FLOW:
  *
- *   Request →
- *      ↓
- *   Check environment
- *      ↓
- *   Validate gateway header
- *      ↓
- *   Allow / Deny
+ *   Request Arrives
+ *        ↓
+ *   Is it / (health)? → allow
+ *        ↓
+ *   Is environment production?
+ *        ↓
+ *   Validate secret header
+ *        ↓
+ *   Allow / Reject
+ *
  */
 app.use((req, res, next) => {
 
   /**
-   * ✅ Always allow health checks
+   * ✅ Always allow health endpoint
    */
   if (req.path === "/") {
     return next();
   }
 
   /**
-   * ✅ Allow all requests in development
+   * ✅ Allow all traffic in development
    */
   if (process.env.NODE_ENV !== "production") {
     return next();
   }
 
   /**
-   * ✅ Check gateway header
+   * ✅ Extract secret from request header
    */
-  const gatewayHeader = req.headers["x-gateway"];
+  const secret = req.headers["x-attendify-secret"];
 
-  if (!gatewayHeader) {
+  /**
+   * ✅ Validate against server-side secret
+   *
+   * If mismatch → reject immediately
+   */
+  if (secret !== process.env.EDGE_SECRET) {
+
     return res.status(403).json({
       success: false,
-      message: "Direct access forbidden"
+      message: "Access denied (invalid gateway)"
     });
   }
 
@@ -161,17 +197,15 @@ app.use((req, res, next) => {
 
 
 /* ============================================================
-   🌐 HEALTH CHECK ROUTE
+   🌐 HEALTH CHECK ENDPOINT
    ============================================================ */
 
 /**
- * ✅ Endpoint:
- *   GET /
+ * ✅ GET /
  *
  * PURPOSE:
- *   - Liveness check
- *   - Load balancer validation
- *   - Deployment verification
+ *   - Check server liveness
+ *   - Used by load balancers / monitoring tools
  */
 app.get("/", (req, res) => {
 
@@ -184,33 +218,29 @@ app.get("/", (req, res) => {
 
 
 /* ============================================================
-   🌐 ROUTE REGISTRATION (MODULAR SYSTEM)
+   🌐 ROUTE REGISTRATION
    ============================================================ */
 
 /**
- * ✅ Authentication routes
- *   Handles login / register / JWT
+ * 📌 Modular structure:
+ *
+ *   /auth     → authentication logic
+ *   /company  → protected business logic
  */
 app.use("/auth", authRoutes);
-
-/**
- * ✅ Company routes
- *   Handles business logic (protected)
- */
 app.use("/company", companyRoutes);
 
 
 /* ============================================================
-   🛑 GLOBAL ERROR HANDLER (CRITICAL)
+   🛑 GLOBAL ERROR HANDLER
    ============================================================ */
 
 /**
- * PURPOSE:
- *   Catch all unhandled exceptions safely
+ * 🎯 Captures all unhandled exceptions
  *
- * BENEFITS:
- *   ✅ Prevents server crash
- *   ✅ Standardizes error response
+ * Prevents:
+ *   - Server crash
+ *   - Information leakage
  */
 app.use((err, req, res, next) => {
 
@@ -225,103 +255,101 @@ app.use((err, req, res, next) => {
 
 
 /* ============================================================
-   🚀 STARTUP SEQUENCE (CONTROLLED BOOTSTRAP)
+   🚀 STARTUP ORCHESTRATION
    ============================================================ */
 
 /**
- * 🧠 BOOT FLOW:
+ * 🧠 STARTUP FLOW:
  *
- *   Application Start
+ *   Application Boot
  *        ↓
  *   Connect to MongoDB
  *        ↓
- *   Inject DB into app context
+ *   Inject database into Express context
  *        ↓
- *   Start HTTP Server
+ *   Bind network listener
  *
- * WHY THIS ORDER?
- *   Prevent handling requests without DB readiness
+ * WHY?
+ *   Avoid accepting requests before DB readiness
  */
+
 async function startServer() {
 
   try {
 
-    console.log("🔄 Initializing application...");
+    console.log("🔄 Bootstrapping system...");
 
     /**
-     * ✅ Step 1: Connect DB
+     * ✅ Step 1: Connect to database
      */
     const db = await connectDB();
 
     /**
-     * ✅ Step 2: Inject DB into global context
+     * ✅ Step 2: Inject DB layer globally
+     *
+     * Accessible via:
+     *   req.app.locals.db
      */
     app.locals.db = db;
 
-    console.log("✅ Database injected into app context");
-
+    console.log("✅ Database connected");
 
     /**
      * ✅ Step 3: Resolve port
      */
     const PORT = process.env.PORT || 3000;
 
-
     /**
-     * 🔥 CRITICAL NETWORK BINDING FIX
+     * 🔥 CRITICAL:
      *
-     * 0.0.0.0 ensures external accessibility (Railway requirement)
+     * Must bind to 0.0.0.0 for cloud environments
      *
-     * Without this:
-     *   → connection refused
+     * Otherwise:
+     *   → External traffic cannot reach server
      */
     app.listen(PORT, "0.0.0.0", () => {
 
-      console.log("✅ SERVER STARTED SUCCESSFULLY");
-      console.log(`🌍 Listening on port: ${PORT}`);
+      console.log("✅ Server started successfully");
+      console.log(`🌍 Listening on port ${PORT}`);
 
     });
 
   } catch (err) {
 
-    /**
-     * 🛑 Fatal startup failure
-     */
-    console.error("❌ STARTUP FAILURE:", err);
-
+    console.error("❌ Startup failed:", err);
     process.exit(1);
   }
 
 }
 
 /**
- * ✅ Start application
+ * ✅ Entry point execution
  */
 startServer();
 
 
 /* ============================================================
-   📊 COMPLETE REQUEST LIFECYCLE (ACADEMIC VIEW)
+   📊 DETAILED REQUEST LIFECYCLE (ACADEMIC)
    ============================================================ */
 
 /**
- * 🔁 FULL PIPELINE:
+ * 🔁 COMPLETE FLOW:
  *
- *   Client Request
+ *   Client Request (Flutter / Postman)
  *        ↓
- *   Express Entry Point
+ *   Cloudflare Worker
+ *        ↓ (inject secret header)
+ *   Express Server
  *        ↓
- *   Global Middleware
+ *   Security Middleware (validate secret)
  *        ↓
- *   Security Filtering
+ *   Route Dispatcher (/auth, /company)
  *        ↓
- *   Route Matching (/auth, /company)
+ *   JWT Middleware (if protected route)
  *        ↓
- *   Authentication Middleware (JWT)
+ *   Business Logic Handler
  *        ↓
- *   Business Logic Execution
- *        ↓
- *   Database Interaction
+ *   Database Query (MongoDB)
  *        ↓
  *   JSON Response
  *
@@ -329,37 +357,16 @@ startServer();
 
 
 /* ============================================================
-   🔐 SECURITY MODEL (LAYERED DEFENSE)
+   ⚡ SCALABILITY MODEL
    ============================================================ */
 
 /**
- * ✅ Defense Layers:
+ * ✅ Stateless API → horizontal scaling ready
+ * ✅ Load balancer friendly
+ * ✅ Edge-distributed via Cloudflare
  *
- *   Layer 1: Cloudflare Worker (Edge)
- *   Layer 2: Gateway Header Validation
- *   Layer 3: JWT Authentication
- *   Layer 4: Data Sanitization
- *
- * ------------------------------------------------------------
- *
- * ⚠️ Threat Mitigation:
- *
- *   Unauthorized Access → Blocked
- *   Direct Backend Exposure → Prevented
- *   Token Abuse → Expiration Control
- *
- */
-
-
-/* ============================================================
-   ⚡ SCALABILITY & CLOUD MODEL
-   ============================================================ */
-
-/**
- * ✅ Stateless API → horizontally scalable
- * ✅ Compatible with load balancers
- * ✅ Edge-friendly (Worker architecture)
- *
+ * RESULT:
+ *   Highly scalable cloud-native backend
  */
 
 
