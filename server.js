@@ -5,42 +5,40 @@
  *
  * 🎯 PURPOSE:
  *
- * This file represents the **composition root** of the backend system.
- * It integrates all infrastructure components into a cohesive runtime.
+ * This file represents the main runtime entry point for the backend system.
+ * It wires together all infrastructure components into a unified application.
  *
  * Responsibilities:
  *
- *   ✅ Initialize HTTP server (Express)
+ *   ✅ Initialize Express server
  *   ✅ Load environment configuration
- *   ✅ Register global middleware
+ *   ✅ Register middleware (CORS, JSON parsing)
  *   ✅ Connect to MongoDB
- *   ✅ Register route modules
- *   ✅ Start application lifecycle
+ *   ✅ Register modular routes
+ *   ✅ Start HTTP listener (network binding)
  *
  * ------------------------------------------------------------
  *
- * 🧠 ARCHITECTURAL MODEL:
+ * 🧠 ARCHITECTURAL FLOW:
  *
- *        Client (Flutter / API Tool)
- *                   ↓
- *        Cloudflare Worker (Edge Gateway)
- *                   ↓
- *        Express Server (THIS FILE)
- *                   ↓
- *        Route Layer (auth / company)
- *                   ↓
- *        Middleware Layer (JWT, security)
- *                   ↓
- *        Database (MongoDB Atlas)
+ *   Client (Flutter / Postman)
+ *        ↓
+ *   Cloudflare Worker (Edge Gateway)
+ *        ↓
+ *   Express Server (THIS FILE)
+ *        ↓
+ *   Routes (auth / company)
+ *        ↓
+ *   Middleware (JWT validation)
+ *        ↓
+ *   MongoDB
  *
  * ------------------------------------------------------------
  *
- * 🔬 DESIGN PRINCIPLES:
+ * 🔬 DESIGN MODEL:
  *
- *   ✅ Separation of Concerns
- *   ✅ Dependency Injection (via app.locals)
- *   ✅ Stateless API Architecture
- *   ✅ Middleware Pipeline Model
+ *   This file acts as the "Composition Root"
+ *   where all dependencies are initialized.
  *
  * ------------------------------------------------------------
  */
@@ -53,18 +51,15 @@
 const express = require("express");
 const cors = require("cors");
 
-/**
- * Load environment variables (.env → process.env)
- */
 require("dotenv").config();
 
 /**
- * Database connection module
+ * Database module
  */
 const { connectDB } = require("./db");
 
 /**
- * Route modules (modular architecture)
+ * Route modules
  */
 const authRoutes = require("./routes/auth");
 const companyRoutes = require("./routes/company");
@@ -78,56 +73,53 @@ const app = express();
 
 
 /* ============================================================
-   🔐 GLOBAL MIDDLEWARE LAYER
+   🔐 GLOBAL MIDDLEWARE
    ============================================================ */
 
 /**
- * 🧠 Middleware acts as a pipeline:
- *
- * Request → Middleware → Routing → Response
- */
-
-/**
- * ✅ CORS ENABLEMENT
- *
- * Allows cross-origin requests from frontend applications
+ * ✅ Enable CORS
  */
 app.use(cors());
 
 /**
- * ✅ JSON BODY PARSER
- *
- * Automatically parses JSON request payload into req.body
+ * ✅ Parse JSON bodies
  */
 app.use(express.json());
 
 
 /**
  * ============================================================
- * 🔐 SECURITY GATEWAY (OPTIONAL HARDENING)
+ * 🔐 SECURITY LAYER (OPTIONAL)
  * ============================================================
  *
- * Blocks direct access (forces traffic through Worker)
- *
- * Trust Model:
- *   Only requests coming from Worker are trusted
- *
+ * Allows local access, blocks unsafe direct production access
  */
 app.use((req, res, next) => {
 
-  if (process.env.NODE_ENV === "production") {
+  /**
+   * Allow health check always
+   */
+  if (req.path === "/") {
+    return next();
+  }
 
-    /**
-     * Check for Worker forwarding header
-     */
-    const forwarded = req.headers["x-gateway"];
+  /**
+   * Allow in development
+   */
+  if (process.env.NODE_ENV !== "production") {
+    return next();
+  }
 
-    if (!forwarded) {
-      return res.status(403).json({
-        success: false,
-        message: "Direct access forbidden"
-      });
-    }
+  /**
+   * Require Cloudflare Worker header in production
+   */
+  const forwarded = req.headers["x-gateway"];
+
+  if (!forwarded) {
+    return res.status(403).json({
+      success: false,
+      message: "Direct access forbidden"
+    });
   }
 
   next();
@@ -142,9 +134,6 @@ app.use((req, res, next) => {
 /**
  * ✅ Endpoint:
  *   GET /
- *
- * PURPOSE:
- *   System monitoring & liveness check
  */
 app.get("/", (req, res) => {
 
@@ -160,65 +149,71 @@ app.get("/", (req, res) => {
    ============================================================ */
 
 /**
- * Modular routing system:
- *
- *   /auth     → authentication logic
- *   /company  → business logic
+ * Modular routing
  */
 app.use("/auth", authRoutes);
 app.use("/company", companyRoutes);
 
 
 /* ============================================================
-   🗄️ DATABASE INITIALIZATION
+   🛑 GLOBAL ERROR HANDLER
    ============================================================ */
 
 /**
- * 🧠 Startup sequence:
- *
- *   1. Connect to database
- *   2. Inject DB into app context
- *   3. Start server
- *
- * This prevents race conditions
+ * Catches unhandled errors in request lifecycle
  */
+app.use((err, req, res, next) => {
+  console.error("🔥 ERROR:", err);
 
-let db;
+  res.status(500).json({
+    success: false,
+    message: "Internal server error"
+  });
+});
 
+
+/* ============================================================
+   🗄️ STARTUP SEQUENCE
+   ============================================================ */
+
+/**
+ * Ensures:
+ *   ✅ DB is connected
+ *   ✅ Server starts properly
+ */
 async function startServer() {
 
   try {
 
     /**
-     * ✅ Step 1: Connect to MongoDB
+     * ✅ Connect to database
      */
-    db = await connectDB();
+    const db = await connectDB();
 
     /**
-     * ✅ Step 2: Inject DB into global app context
-     *
-     * Accessible from:
-     *   req.app.locals.db
+     * ✅ Inject DB globally
      */
     app.locals.db = db;
 
 
     /**
-     * ✅ Step 3: Start HTTP server
+     * ✅ Resolve port (Railway provides it)
      */
     const PORT = process.env.PORT || 3000;
 
-    app.listen(PORT, () => {
+    /**
+     * 🔥 CRITICAL FIX:
+     *
+     * Server MUST bind to 0.0.0.0
+     * otherwise Railway cannot connect → connection refused
+     */
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
 
-
   } catch (err) {
 
-    /**
-     * 🛑 Critical failure handling
-     */
-    console.error("❌ Failed to start server:", err);
+    console.error("❌ Startup failed:", err);
     process.exit(1);
   }
 
@@ -228,62 +223,50 @@ startServer();
 
 
 /* ============================================================
-   📊 REQUEST LIFECYCLE DIAGRAM (DETAILED)
+   📊 REQUEST FLOW (DETAILED)
    ============================================================ */
 
 /**
- * 🔁 FULL REQUEST FLOW:
- *
- *   Client (Flutter / Postman)
- *        ↓
- *   Cloudflare Worker
- *        ↓
+ *   Incoming HTTP Request
+ *            ↓
  *   Express Server
- *        ↓
+ *            ↓
  *   Global Middleware
- *        ↓
- *   Security Check
- *        ↓
- *   Route Matching (/auth, /company)
- *        ↓
+ *            ↓
+ *   Security Layer
+ *            ↓
+ *   Route Matching
+ *            ↓
  *   Auth Middleware (JWT)
- *        ↓
+ *            ↓
  *   Route Handler
- *        ↓
- *   Database Query
- *        ↓
+ *            ↓
+ *   Database Interaction
+ *            ↓
  *   JSON Response
  *
  */
 
 
 /* ============================================================
-   🔐 SECURITY ANALYSIS (ENTERPRISE LEVEL)
+   🔐 SECURITY MODEL
    ============================================================ */
 
 /**
  * ✅ DEFENSE LAYERS:
  *
- *   Layer 1: Cloudflare Worker (Edge protection)
- *   Layer 2: Header validation (x-gateway)
- *   Layer 3: JWT authentication
- *   Layer 4: DB access control
+ *   Edge Layer → Cloudflare Worker
+ *   Transport → HTTPS
+ *   App Layer → JWT
+ *   Data Layer → MongoDB
  *
  * ------------------------------------------------------------
  *
- * ⚠️ THREATS MITIGATED:
+ * ✅ THREAT MITIGATION:
  *
- *   - Direct backend access → blocked
- *   - Unauthorized requests → JWT validation
- *   - Replay tokens → expiration control
- *
- * ------------------------------------------------------------
- *
- * ✅ BEST PRACTICES:
- *
- *   - Never expose raw DB to internet
- *   - Always use API gateway
- *   - Keep server stateless
+ *   Unauthorized access → JWT validation
+ *   Direct backend exposure → header check
+ *   Token abuse → expiration control
  *
  */
 
@@ -293,11 +276,9 @@ startServer();
    ============================================================ */
 
 /**
- * This architecture supports:
- *
- *   ✅ Horizontal scaling (multiple instances)
- *   ✅ CDN + Edge routing (Worker)
- *   ✅ Stateless load balancing
+ * ✅ Stateless design
+ * ✅ Horizontal scaling
+ * ✅ Edge distribution via Workers
  *
  */
 
