@@ -261,62 +261,74 @@ This layered security model reduces the probability that a single failure compro
 
 # 7. Authentication Flow
 
-This diagram describes how a company authenticates and receives a JWT.
+This diagram describes how a company authenticates and receives a signed JWT.
 
 ```mermaid
 sequenceDiagram
-    participant Client as Client
-    participant Worker as Cloudflare Worker
-    participant Backend as Express Backend
-    participant DB as MongoDB
+    participant Client
+    participant Worker
+    participant Backend
+    participant Database
 
     Client->>Worker: POST /auth/login
     Worker->>Backend: Forward request with edge secret
-    Backend->>DB: Find company by email
-    DB-->>Backend: Company document
+    Backend->>Database: Find company by email
+    Database-->>Backend: Return company document
+
     Backend->>Backend: Compare bcrypt password hash
     Backend->>Backend: Generate signed JWT
-    Backend-->>Worker: JWT response
-    Worker-->>Client: JWT response
+
+    Backend-->>Worker: Return JWT response
+    Worker-->>Client: Return JWT response
 ```
 
 ## Explanation
 
-Authentication is stateless.  
-After successful login, the backend returns a signed JWT.  
+Authentication is stateless.
+
+After a successful login, the backend returns a signed JWT.
+
 The client uses this token in the `Authorization` header for protected routes.
 
----
-
+```http
+Authorization: Bearer <JWT_TOKEN>
+```
 # 8. Company Registration Flow
+
+This diagram describes how a new company tenant is registered in the Attendify platform.
 
 ```mermaid
 sequenceDiagram
-    participant Client as Client
-    participant Worker as Cloudflare Worker
-    participant Backend as Express Backend
-    participant DB as MongoDB
+    participant Client
+    participant Worker
+    participant Backend
+    participant Database
 
     Client->>Worker: POST /auth/register
-    Worker->>Backend: Forward request
+    Worker->>Backend: Forward request with edge secret
+
     Backend->>Backend: Validate input
     Backend->>Backend: Normalize email
-    Backend->>DB: Check existing company
-    DB-->>Backend: Result
-    Backend->>Backend: Hash password using bcrypt
-    Backend->>DB: Insert company document
-    DB-->>Backend: Insert success
-    Backend-->>Worker: Registration response
-    Worker-->>Client: Registration response
+
+    Backend->>Database: Check existing company
+    Database-->>Backend: Return lookup result
+
+    Backend->>Backend: Hash password with bcrypt
+
+    Backend->>Database: Insert company document
+    Database-->>Backend: Insert success
+
+    Backend-->>Worker: Return registration response
+    Worker-->>Client: Return registration response
 ```
 
 ## Explanation
 
-The registration flow protects passwords through one-way hashing.  
+The registration flow protects passwords through one-way hashing.
+
 The database stores hashed passwords, not plaintext passwords.
 
----
-
+The system also normalizes email input and rejects duplicate company registration attempts.
 # 9. Secure Attendance Flow
 
 The attendance flow uses nonce-based freshness and HMAC-based payload integrity.
