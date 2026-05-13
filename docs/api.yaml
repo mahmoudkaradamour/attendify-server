@@ -1,0 +1,970 @@
+openapi: 3.0.3
+
+info:
+  title: Attendify API
+  version: 1.0.0
+  description: |
+    Attendify is a secure, distributed, cloud-native SaaS backend system.
+
+    The platform provides:
+
+      - Company identity management
+      - Secure multi-tenant authentication
+      - Edge-based request routing through Cloudflare Worker
+      - JWT-based stateless authentication
+      - Cryptographic request verification using HMAC-SHA256
+      - Nonce-based replay protection
+      - Secure attendance evidence submission
+
+    Security model:
+
+      - Clients communicate with the Cloudflare Worker gateway.
+      - The Cloudflare Worker forwards requests to the Attendify backend.
+      - The backend validates trusted gateway traffic using an internal edge secret.
+      - Protected company routes require JWT Bearer authentication.
+      - Critical attendance requests require nonce freshness and HMAC signature verification.
+
+    Request flow:
+
+      Client -> Cloudflare Worker -> Attendify Backend -> MongoDB Atlas
+
+    Important production rule:
+
+      Clients should use the Cloudflare Worker URL as the public API entry point.
+      The Railway backend URL should not be used directly by clients.
+
+  license:
+    name: Private / Internal Use
+
+servers:
+  - url: http://localhost:3000
+    description: Local Development Server
+
+  - url: https://attendify-worker.mahmouddamour-3aa.workers.dev
+    description: Production Edge Gateway
+
+tags:
+  - name: Auth
+    description: Company registration, login, and JWT issuance.
+
+  - name: Company
+    description: Company profile, full company data, lookup, update, and soft delete operations.
+
+  - name: Security
+    description: Nonce issuance and cryptographic request protection.
+
+  - name: Attendance
+    description: Secure attendance submission using signed payloads, nonce validation, and replay protection.
+
+paths:
+
+  /:
+    get:
+      tags:
+        - Security
+      operationId: healthCheck
+      summary: Health check
+      description: |
+        Returns backend liveness information.
+
+        This endpoint is intentionally public and can be used by:
+          - Cloud monitoring tools
+          - Load balancers
+          - Deployment verification scripts
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: OK
+                system: Attendify Backend
+                uptime: 123.45
+
+  /auth/register:
+    post:
+      tags:
+        - Auth
+      operationId: registerCompany
+      summary: Register a new company
+      description: |
+        Creates a new company tenant account.
+
+        Security behavior:
+
+          - Email is normalized before storage.
+          - Password is hashed using bcrypt.
+          - Duplicate company email registration is rejected.
+          - Plaintext passwords are never stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+            examples:
+              validRegister:
+                summary: Valid company registration
+                value:
+                  name: acme
+                  email: admin@acme.com
+                  password: strongpassword
+      responses:
+        "200":
+          description: Company registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+              example:
+                success: true
+                message: Company registered successfully
+
+        "400":
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Invalid input data
+
+        "409":
+          description: Company already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Company already exists
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  /auth/login:
+    post:
+      tags:
+        - Auth
+      operationId: loginCompany
+      summary: Login and receive JWT token
+      description: |
+        Authenticates a company using email and password.
+
+        On successful authentication:
+
+          - A signed JWT token is returned.
+          - The client must send the token in the Authorization header.
+          - The token follows the Bearer authentication scheme.
+
+        Header usage:
+
+          Authorization: Bearer <JWT>
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              validLogin:
+                summary: Valid login request
+                value:
+                  email: admin@acme.com
+                  password: strongpassword
+      responses:
+        "200":
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              example:
+                success: true
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+        "400":
+          description: Invalid credentials format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Invalid credentials
+
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Invalid credentials
+
+        "403":
+          description: Account temporarily locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Account temporarily locked
+
+        "404":
+          description: Company not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Company not found
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /company/profile:
+    get:
+      tags:
+        - Company
+      operationId: getCompanyProfile
+      summary: Get company profile from JWT
+      description: |
+        Returns lightweight company identity extracted directly from the verified JWT token.
+
+        This endpoint is optimized for fast identity checks and does not require a database lookup.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Company profile returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+              example:
+                success: true
+                company:
+                  id: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+                  email: admin@acme.com
+
+        "401":
+          description: Missing, expired, or invalid JWT token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Unauthorized
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /company/me:
+    get:
+      tags:
+        - Company
+      operationId: getFullCompanyData
+      summary: Get full company data
+      description: |
+        Returns the full company document from the database.
+
+        Sensitive fields such as password and apiKey must not be returned in the response.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Full company data returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyResponse"
+              example:
+                success: true
+                company:
+                  id: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+                  name: acme
+                  email: admin@acme.com
+                  createdAt: "2026-05-13T09:00:00.000Z"
+                  status: active
+                  loginAttempts: 0
+                  lockUntil: null
+
+        "401":
+          description: Unauthorized request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "404":
+          description: Company not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /company/update:
+    put:
+      tags:
+        - Company
+      operationId: updateCompany
+      summary: Update company data
+      description: |
+        Updates allowed company fields only.
+
+        Allowed fields:
+
+          - name
+          - email
+
+        Protected fields that must never be updated through this endpoint:
+
+          - id
+          - password
+          - apiKey
+          - status
+          - loginAttempts
+          - lockUntil
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompanyUpdateRequest"
+            example:
+              name: acme-updated
+              email: updated@acme.com
+      responses:
+        "200":
+          description: Company updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+              example:
+                success: true
+                message: Company updated
+
+        "400":
+          description: No valid fields provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: No valid fields provided
+
+        "401":
+          description: Unauthorized request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /company/delete:
+    delete:
+      tags:
+        - Company
+      operationId: softDeleteCompany
+      summary: Soft delete company
+      description: |
+        Performs logical deletion by marking the company status as deleted.
+
+        The record is preserved for:
+
+          - Auditability
+          - Recovery
+          - Historical tracking
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Company soft deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+              example:
+                success: true
+                message: Company deleted soft
+
+        "401":
+          description: Unauthorized request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /company/lookup/{name}:
+    get:
+      tags:
+        - Company
+      operationId: lookupCompanyByName
+      summary: Lookup company by name
+      description: |
+        Public endpoint used by clients to verify whether a company exists.
+
+        This endpoint returns minimal safe metadata only.
+        It must not return sensitive fields such as email, password, apiKey, or internal security metadata.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Company name to search for
+          schema:
+            type: string
+            minLength: 1
+          example: acme
+      responses:
+        "200":
+          description: Lookup result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyLookupResponse"
+              examples:
+                found:
+                  summary: Company exists
+                  value:
+                    exists: true
+                    company:
+                      id: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+                      name: acme
+                notFound:
+                  summary: Company does not exist
+                  value:
+                    exists: false
+
+        "400":
+          description: Invalid company name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /nonce:
+    get:
+      tags:
+        - Security
+      operationId: generateNonce
+      summary: Generate secure nonce
+      description: |
+        Issues a cryptographically secure nonce.
+
+        The nonce is used to:
+
+          - Provide request freshness
+          - Prevent replay attacks
+          - Bind a signed request to a short validity window
+
+        The client should request a new nonce before submitting a signed attendance payload.
+      responses:
+        "200":
+          description: Nonce generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NonceResponse"
+              example:
+                success: true
+                nonce:
+                  value: 8f2d88d30b67b9e51c7a6f4d1b2c3e9a0
+                  issuedAt: 1710000000000
+                  expiresAt: 1710000300000
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Failed to generate nonce
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Failed to generate nonce
+
+  /attendance:
+    post:
+      tags:
+        - Attendance
+      operationId: submitAttendance
+      summary: Submit signed attendance evidence
+      description: |
+        Submits a signed attendance evidence payload.
+
+        Verification requirements:
+
+          - Payload must contain a valid nonce.
+          - Nonce must not be expired.
+          - Nonce must not be reused.
+          - Signature must match the canonicalized payload.
+          - Payload must be signed using HMAC-SHA256.
+
+        Recommended client flow:
+
+          1. GET /nonce
+          2. Build attendance payload
+          3. Canonicalize payload deterministically
+          4. Sign canonical payload using HMAC-SHA256
+          5. POST /attendance
+
+        Security result:
+
+          - Modified payloads are rejected.
+          - Replayed payloads are rejected.
+          - Expired nonce payloads are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttendanceRequest"
+            example:
+              payload:
+                userId: employee-123
+                timestamp: 1710000000000
+                location:
+                  lat: 25.2048
+                  lng: 55.2708
+                nonce:
+                  value: 8f2d88d30b67b9e51c7a6f4d1b2c3e9a0
+                  issuedAt: 1710000000000
+                  expiresAt: 1710000300000
+              signature: 1f2a9c4e8b88adcc71b7e40f6f0d8d0d8f1e4e9c5a3b2c1d0e9f8a7b6c5d4e3f
+      responses:
+        "200":
+          description: Attendance accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceSuccessResponse"
+              example:
+                success: true
+                message: Attendance recorded successfully
+                data:
+                  userId: employee-123
+                  timestamp: 1710000000000
+                  location:
+                    lat: 25.2048
+                    lng: 55.2708
+
+        "400":
+          description: Missing payload or signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Missing payload or signature
+
+        "401":
+          description: Cryptographic verification failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidSignature:
+                  summary: Invalid signature
+                  value:
+                    success: false
+                    message: Invalid signature
+                replayDetected:
+                  summary: Replay attack detected
+                  value:
+                    success: false
+                    message: Replay attack detected
+                expiredNonce:
+                  summary: Expired nonce
+                  value:
+                    success: false
+                    message: Nonce expired or invalid
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT Bearer authentication.
+
+        Usage:
+
+          Authorization: Bearer <token>
+
+  schemas:
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          example: OK
+        system:
+          type: string
+          example: Attendify Backend
+        uptime:
+          type: number
+          example: 123.45
+
+    SuccessMessage:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Operation completed successfully
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Internal server error
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - email
+        - password
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: acme
+        email:
+          type: string
+          format: email
+          example: admin@acme.com
+        password:
+          type: string
+          format: password
+          minLength: 6
+          example: strongpassword
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: admin@acme.com
+        password:
+          type: string
+          format: password
+          minLength: 6
+          example: strongpassword
+
+    AuthResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        token:
+          type: string
+          description: Signed JWT token
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    ProfileResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        company:
+          $ref: "#/components/schemas/JwtCompanyIdentity"
+
+    JwtCompanyIdentity:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          example: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+        email:
+          type: string
+          format: email
+          example: admin@acme.com
+
+    CompanyResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        company:
+          $ref: "#/components/schemas/Company"
+
+    Company:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          example: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+        name:
+          type: string
+          example: acme
+        email:
+          type: string
+          format: email
+          example: admin@acme.com
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-05-13T09:00:00.000Z"
+        status:
+          type: string
+          example: active
+        loginAttempts:
+          type: integer
+          example: 0
+        lockUntil:
+          nullable: true
+          oneOf:
+            - type: number
+            - type: "null"
+          example: null
+
+    CompanyUpdateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: acme-updated
+        email:
+          type: string
+          format: email
+          example: updated@acme.com
+
+    CompanyLookupResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        exists:
+          type: boolean
+          example: true
+        company:
+          nullable: true
+          oneOf:
+            - $ref: "#/components/schemas/PublicCompany"
+            - type: "null"
+
+    PublicCompany:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          example: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+        name:
+          type: string
+          example: acme
+
+    NonceResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        nonce:
+          $ref: "#/components/schemas/Nonce"
+
+    Nonce:
+      type: object
+      additionalProperties: false
+      required:
+        - value
+        - issuedAt
+        - expiresAt
+      properties:
+        value:
+          type: string
+          example: 8f2d88d30b67b9e51c7a6f4d1b2c3e9a0
+        issuedAt:
+          type: number
+          description: Unix timestamp in milliseconds
+          example: 1710000000000
+        expiresAt:
+          type: number
+          description: Unix timestamp in milliseconds
+          example: 1710000300000
+
+    AttendanceRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - payload
+        - signature
+      properties:
+        payload:
+          $ref: "#/components/schemas/AttendancePayload"
+        signature:
+          type: string
+          description: HMAC-SHA256 signature of the canonicalized payload
+          example: 1f2a9c4e8b88adcc71b7e40f6f0d8d0d8f1e4e9c5a3b2c1d0e9f8a7b6c5d4e3f
+
+    AttendancePayload:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - timestamp
+        - location
+        - nonce
+      properties:
+        userId:
+          type: string
+          example: employee-123
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+          example: 1710000000000
+        location:
+          $ref: "#/components/schemas/GeoLocation"
+        nonce:
+          $ref: "#/components/schemas/Nonce"
+
+    GeoLocation:
+      type: object
+      additionalProperties: false
+      required:
+        - lat
+        - lng
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 25.2048
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 55.2708
+
+    AttendanceSuccessResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Attendance recorded successfully
+        data:
+          type: object
+          additionalProperties: false
+          properties:
+            userId:
+              type: string
+              example: employee-123
+            timestamp:
+              type: number
+              example: 1710000000000
+            location:
+              $ref: "#/components/schemas/GeoLocation"

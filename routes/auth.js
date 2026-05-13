@@ -1,123 +1,124 @@
-/**===========
- * 🔐 AUTHENTICATION ROUTES MODULE (JWT + SECURE IDENTITY LAYER)
+/**
+ * ============================================================
+ * 🔐 AUTHENTICATION ROUTES MODULE
  * ============================================================
  *
  * 🎯 PURPOSE:
  *
- * This module implements the full authentication lifecycle:
+ * This module implements a **stateless authentication system**
+ * using:
  *
- *   ✅ Secure company registration
- *   ✅ Credential verification (login)
- *   ✅ JWT token issuance (stateless authentication)
+ *   ✅ Secure password hashing (bcrypt)
+ *   ✅ Credential verification pipeline
+ *   ✅ JWT-based identity layer
  *
  * ------------------------------------------------------------
  *
  * 🧠 ARCHITECTURAL POSITION:
  *
- *   Client (Flutter / API Tool)
- *           ↓
- *   Auth Routes (THIS FILE)
- *           ↓
+ *   Client
+ *     ↓
+ *   Auth Controller (THIS FILE)
+ *     ↓
  *   Database (MongoDB)
+ *     ↓
+ *   JWT Issuance
  *
  * ------------------------------------------------------------
  *
- * 📊 AUTH FLOW DIAGRAM:
+ * 🔬 SECURITY MODEL:
  *
- * REGISTER FLOW:
- *
- *   Client → POST /auth/register
- *           ↓
- *   Validate Input
- *           ↓
- *   Check Existing User
- *           ↓
- *   Hash Password (bcrypt)
- *           ↓
- *   Store in DB
- *           ↓
- *   Success Response
+ *   Identity = Verified Credentials + Signed JWT
  *
  * ------------------------------------------------------------
  *
- * LOGIN FLOW:
+ * 📊 AUTHENTICATION FLOW:
  *
- *   Client → POST /auth/login
- *           ↓
- *   Validate Credentials
- *           ↓
- *   Fetch from DB
- *           ↓
- *   Compare Password
- *           ↓
- *   Generate JWT
- *           ↓
- *   Return Token
+ *   REGISTER:
+ *     Validate → Hash → Store → OK
+ *
+ *   LOGIN:
+ *     Validate → Compare → Sign JWT → Return Token
  *
  * ------------------------------------------------------------
  */
 
-
-/* ============================================================
-   📦 MODULE IMPORTS
-   ============================================================ */
 
 const express = require("express");
 const router = express.Router();
 
 const jwt = require("jsonwebtoken");
-
-/**
- * Password utilities
- */
-const { hashPassword, comparePassword } = require("../utils/hash");
-
-/**
- * Secure ID generator
- */
 const crypto = require("crypto");
+
+const {
+  hashPassword,
+  comparePassword
+} = require("../utils/hash");
 
 
 /* ============================================================
-   🏢 REGISTER COMPANY
+   🧱 INPUT VALIDATION UTILITIES
    ============================================================ */
 
+/**
+ * Basic email validation (RFC-lite)
+ */
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+
+/**
+ * Password policy enforcement
+ *
+ * REQUIREMENTS:
+ *   - Minimum length: 6
+ */
+function isStrongPassword(password) {
+  return typeof password === "string" && password.length >= 6;
+}
+
+
+
+/* ============================================================
+   🏢 REGISTER ENDPOINT
+   ============================================================ */
+
+/**
+ * POST /auth/register
+ */
 router.post("/register", async (req, res) => {
 
   try {
 
-    /* ========================================================
-       🧠 STEP 1: INPUT EXTRACTION
-       ======================================================== */
-    const { name, email, password } = req.body;
+    /* --------------------------------------------------------
+       STEP 1: INPUT EXTRACTION & NORMALIZATION
+       -------------------------------------------------------- */
 
-    /* ========================================================
-       🧠 STEP 2: VALIDATION
-       ======================================================== */
-    if (!name || !email || !password) {
+    let { name, email, password } = req.body;
+
+    email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+    if (!name || !isValidEmail(email) || !isStrongPassword(password)) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields"
+        message: "Invalid input data"
       });
     }
 
-    /**
-     * Basic normalization
-     */
-    const normalizedEmail = email.toLowerCase().trim();
 
+    /* --------------------------------------------------------
+       STEP 2: DATABASE ACCESS
+       -------------------------------------------------------- */
 
-    /* ========================================================
-       🧠 STEP 3: DATABASE ACCESS
-       ======================================================== */
     const db = req.app.locals.db;
 
 
-    /* ========================================================
-       🧠 STEP 4: DUPLICATION CHECK
-       ======================================================== */
-    const existing = await db.collection("companies")
-      .findOne({ email: normalizedEmail });
+    /* --------------------------------------------------------
+       STEP 3: DUPLICATE CHECK
+       -------------------------------------------------------- */
+
+    const existing = await db.collection("companies").findOne({ email });
 
     if (existing) {
       return res.status(409).json({
@@ -127,59 +128,65 @@ router.post("/register", async (req, res) => {
     }
 
 
-    /* ========================================================
-       🔐 STEP 5: PASSWORD HASHING
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 4: PASSWORD HASHING
+       -------------------------------------------------------- */
 
-    /**
-     * bcrypt hashing:
-     *   - generates salt
-     *   - hashes password irreversibly
-     */
     const hashedPassword = await hashPassword(password);
 
 
-    /* ========================================================
-       🧠 STEP 6: ENTITY CONSTRUCTION
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 5: ENTITY CONSTRUCTION
+       -------------------------------------------------------- */
 
     const company = {
       id: crypto.randomUUID(),
       name,
-      email: normalizedEmail,
+      email,
       password: hashedPassword,
+
+      /**
+       * API key (future integration: mobile devices)
+       */
       apiKey: crypto.randomUUID(),
+
+      /**
+       * Security metadata
+       */
+      loginAttempts: 0,
+      lockUntil: null,
+
+      /**
+       * Audit data
+       */
       createdAt: new Date(),
-      status: "active",              // ✅ extensible for admin control
-      loginAttempts: 0               // ✅ brute-force protection base
+      status: "active"
     };
 
 
-    /* ========================================================
-       🗄️ STEP 7: DATABASE INSERTION
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 6: INSERT INTO DATABASE
+       -------------------------------------------------------- */
 
     await db.collection("companies").insertOne(company);
 
 
-    /* ========================================================
-       📤 STEP 8: RESPONSE
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 7: RESPONSE
+       -------------------------------------------------------- */
 
-    res.json({
+    return res.json({
       success: true,
       message: "Company registered successfully"
     });
 
   } catch (err) {
 
-    /* ========================================================
-       🛑 ERROR HANDLING
-       ======================================================== */
+    console.error("🔥 REGISTER ERROR:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Server error"
+      message: "Internal server error"
     });
   }
 
@@ -187,35 +194,39 @@ router.post("/register", async (req, res) => {
 
 
 /* ============================================================
-   🔐 LOGIN ROUTE
+   🔐 LOGIN ENDPOINT
    ============================================================ */
 
+/**
+ * POST /auth/login
+ */
 router.post("/login", async (req, res) => {
 
   try {
 
-    /* ========================================================
-       🧠 STEP 1: EXTRACT CREDENTIALS
-       ======================================================== */
-    const { email, password } = req.body;
+    /* --------------------------------------------------------
+       STEP 1: INPUT EXTRACTION
+       -------------------------------------------------------- */
 
-    if (!email || !password) {
+    let { email, password } = req.body;
+
+    email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+    if (!isValidEmail(email) || !password) {
       return res.status(400).json({
         success: false,
-        message: "Missing credentials"
+        message: "Invalid credentials"
       });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
 
+    /* --------------------------------------------------------
+       STEP 2: DATABASE LOOKUP
+       -------------------------------------------------------- */
 
-    /* ========================================================
-       🗄️ STEP 2: DATABASE FETCH
-       ======================================================== */
     const db = req.app.locals.db;
 
-    const company = await db.collection("companies")
-      .findOne({ email: normalizedEmail });
+    const company = await db.collection("companies").findOne({ email });
 
     if (!company) {
       return res.status(404).json({
@@ -225,19 +236,42 @@ router.post("/login", async (req, res) => {
     }
 
 
-    /* ========================================================
-       🔐 STEP 3: PASSWORD VERIFICATION
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 3: ACCOUNT LOCK CHECK
+       -------------------------------------------------------- */
+
+    if (company.lockUntil && Date.now() < company.lockUntil) {
+      return res.status(403).json({
+        success: false,
+        message: "Account temporarily locked"
+      });
+    }
+
+
+    /* --------------------------------------------------------
+       STEP 4: PASSWORD VERIFICATION
+       -------------------------------------------------------- */
 
     const isValid = await comparePassword(password, company.password);
 
     if (!isValid) {
+
+      const attempts = (company.loginAttempts || 0) + 1;
+
+      const update = {
+        $set: { loginAttempts: attempts }
+      };
+
       /**
-       * Optional: increment failed attempts
+       * Lock after 5 failed attempts
        */
+      if (attempts >= 5) {
+        update.$set.lockUntil = Date.now() + 15 * 60 * 1000; // 15 mins
+      }
+
       await db.collection("companies").updateOne(
         { id: company.id },
-        { $inc: { loginAttempts: 1 } }
+        update
       );
 
       return res.status(401).json({
@@ -247,111 +281,109 @@ router.post("/login", async (req, res) => {
     }
 
 
-    /* ========================================================
-       ✅ STEP 4: RESET LOGIN ATTEMPTS
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 5: RESET SECURITY COUNTERS
+       -------------------------------------------------------- */
+
     await db.collection("companies").updateOne(
       { id: company.id },
-      { $set: { loginAttempts: 0 } }
+      { $set: { loginAttempts: 0, lockUntil: null } }
     );
 
 
-    /* ========================================================
-       🔑 STEP 5: JWT GENERATION
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 6: JWT TOKEN GENERATION
+       -------------------------------------------------------- */
 
-    /**
-     * Payload = identity claims
-     */
     const payload = {
       id: company.id,
       email: company.email
     };
 
-    const token = jwt.sign(
-      payload,
-      process.env.JWT_SECRET,
-      {
-        expiresIn: process.env.JWT_EXPIRES || "7d"
-      }
-    );
+    const token = jwt.sign(payload, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES || "7d",
+      algorithm: "HS256"
+    });
 
 
-    /* ========================================================
-       📤 STEP 6: RESPONSE
-       ======================================================== */
+    /* --------------------------------------------------------
+       STEP 7: RETURN RESPONSE
+       -------------------------------------------------------- */
 
-    res.json({
+    return res.json({
       success: true,
       token
     });
 
   } catch (err) {
 
-    res.status(500).json({
-      success: false,
-      message: "Server error"
-    });
+    console.error("🔥 LOGIN ERROR:", err);
 
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
   }
+
 });
 
 
 /* ============================================================
-   📊 SYSTEM AUTH FLOW (FULL VIEW)
-   ============================================================ */
-
-/**
- * 🔁 COMPLETE AUTHENTICATION PIPELINE:
- *
- *   REGISTER:
- *     Client → Validate → Hash → Store → OK
- *
- *   LOGIN:
- *     Client → Fetch → Compare → JWT → Token
- *
- *   REQUEST:
- *     Client → Authorization Header → Middleware → Protected Route
- *
- */
-
-
-/* ============================================================
-   🔐 SECURITY ANALYSIS
-   ============================================================ */
-
-/**
- * 🔬 PASSWORD SECURITY:
- *
- *   - bcrypt hashing
- *   - salted hash
- *   - irreversible transformation
- *
- * 🔬 TOKEN SECURITY:
- *
- *   - JWT signed with HMAC SHA-256
- *   - expiration enforcement
- *
- * ------------------------------------------------------------
- *
- * ⚠️ THREATS & MITIGATIONS:
- *
- *   Brute force attack → loginAttempts tracking
- *   Password leak → hashing
- *   Token forgery → JWT_SECRET
- *   Replay attack → expiration
- *
- */
-
-
-/* ============================================================
-   📦 EXPORT
+   📤 EXPORT ROUTER
    ============================================================ */
 
 module.exports = router;
 
 
 /* ============================================================
-   🏁 END OF FILE
+   📊 FULL AUTHENTICATION PIPELINE (ACADEMIC VIEW)
    ============================================================ */
 
+/**
+ * 🔁 SYSTEM FLOW:
+ *
+ *   REGISTER:
+ *     Input → Validate → Hash → Store
+ *
+ *   LOGIN:
+ *     Input → Validate → Fetch → Compare → JWT
+ *
+ *   AUTHENTICATED REQUEST:
+ *     Client → Bearer Token → Middleware → Access
+ *
+ *
+ * ------------------------------------------------------------
+ *
+ * 🔐 SECURITY GUARANTEES:
+ *
+ *   ✅ Passwords never stored in plain text
+ *   ✅ Brute-force mitigation (lock mechanism)
+ *   ✅ Stateless authentication (JWT)
+ *   ✅ Input normalization integrity
+ *
+ *
+ * ------------------------------------------------------------
+ *
+ * ⚡ ATTACKS MITIGATED:
+ *
+ *   ❌ Credential Stuffing
+ *   ❌ Brute Force
+ *   ❌ Token Forgery
+ *   ❌ Email Enumeration (partial)
+ *
+ *
+ * ------------------------------------------------------------
+ *
+ * 🧠 DESIGN PRINCIPLE:
+ *
+ *   Identity must be:
+ *     → Verified
+ *     → Signed
+ *     → Expirable
+ *
+ *
+ * ============================================================
+ *
+ * 🏁 END OF FILE
+ * ============================================================
+ */
