@@ -1,191 +1,188 @@
 /**
  * ============================================================
- * 🌐 ATTENDIFY BACKEND SERVER (SECURE COMPOSITION ROOT)
+ * 🌐 ATTENDIFY BACKEND SERVER (COMPOSITION ROOT)
  * ============================================================
  *
  * 🎯 PURPOSE:
  *
- * This module represents the **Composition Root** of the system,
- * where all infrastructure components are initialized and wired together.
+ * This module serves as the **composition root** of the backend system.
+ * It initializes infrastructure components and orchestrates the entire runtime.
  *
  * ------------------------------------------------------------
  *
- * 🧠 ARCHITECTURAL OVERVIEW:
+ * 🧠 SYSTEM ARCHITECTURE OVERVIEW:
  *
- *   Client (Flutter App / API Tool)
- *                ↓
+ *   Client (Flutter / API Consumer)
+ *        ↓
  *   Cloudflare Worker (Edge Gateway)
- *                ↓
- *   Express Backend (THIS FILE)
- *                ↓
- *   Route Layer (/auth, /company)
- *                ↓
- *   Middleware (JWT, Validation)
- *                ↓
- *   MongoDB (Persistence Layer)
+ *        ↓
+ *   Express Server (THIS MODULE)
+ *        ↓
+ *   Middleware Pipeline
+ *        ↓
+ *   Route Controllers (/auth, /company, /nonce, /attendance)
+ *        ↓
+ *   Security Layer (JWT + Cryptographic Verification)
+ *        ↓
+ *   MongoDB (Persistence)
  *
  * ------------------------------------------------------------
  *
  * 🔬 DESIGN PRINCIPLES:
  *
- *   ✅ Separation of Concerns
- *   ✅ Zero-Trust Architecture
+ *   ✅ Composition Root Pattern
+ *   ✅ Zero-Trust Security Model
  *   ✅ Stateless API Design
- *   ✅ Middleware Pipeline Pattern
+ *   ✅ Layered Architecture
+ *   ✅ Defense-in-Depth Strategy
  *
  * ------------------------------------------------------------
  *
- * 🔐 SECURITY MODEL:
+ * 🔐 SECURITY MODEL (MULTI-LAYER DEFENSE):
  *
- *   Layer 1 → Cloudflare Worker (Edge Filtering)
- *   Layer 2 → Secret Header Validation (Gateway Lock)
- *   Layer 3 → JWT Authentication (User Identity)
- *   Layer 4 → Database Access Control
+ *   Layer 1 → Edge Gateway (Cloudflare Worker)
+ *   Layer 2 → Shared Secret Validation (x-attendify-secret)
+ *   Layer 3 → JWT Authentication (Identity Layer)
+ *   Layer 4 → Cryptographic Verification (HMAC + Nonce)
+ *   Layer 5 → Database Integrity Enforcement
  *
  * ------------------------------------------------------------
  */
 
 
-/* ============================================================
-   📦 MODULE IMPORTS
-   ============================================================ */
+// ============================================================
+// 📦 MODULE IMPORTS
+// ============================================================
 
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
-
-/**
- * Load environment variables from .env into process.env
- */
 require("dotenv").config();
 
-/**
- * Database connector (MongoDB)
- */
 const { connectDB } = require("./db");
 
 /**
- * Modular route handlers
+ * Core business routes
  */
 const authRoutes = require("./routes/auth");
 const companyRoutes = require("./routes/company");
 
+/**
+ * Security endpoints
+ */
+const nonceRoutes = require("./src/api/nonce.controller");
+const attendanceRoutes = require("./src/api/attendance.controller");
 
-/* ============================================================
-   🧱 APPLICATION INITIALIZATION
-   ============================================================ */
+
+// ============================================================
+// 🧱 APPLICATION INITIALIZATION
+// ============================================================
 
 const app = express();
 
 
-/* ============================================================
-   🔐 GLOBAL MIDDLEWARE PIPELINE
-   ============================================================ */
+// ============================================================
+// 🔐 GLOBAL MIDDLEWARE PIPELINE
+// ============================================================
 
 /**
- * 🧠 Middleware is executed sequentially:
+ * 📊 REQUEST PROCESSING PIPELINE:
  *
- *   Incoming Request →
- *      ↓
- *   Security Middleware
- *      ↓
- *   JSON Parser
- *      ↓
- *   Route Matching
- *      ↓
+ *   Incoming Request
+ *        ↓
+ *   Helmet (Security Headers)
+ *        ↓
+ *   Disable fingerprinting
+ *        ↓
+ *   CORS policy enforcement
+ *        ↓
+ *   JSON parsing
+ *        ↓
+ *   Zero-Trust Validation
+ *        ↓
+ *   Route Handling
+ *        ↓
  *   Response
  */
 
 /**
- * ✅ Security headers (Helmet)
- *
- * Prevents:
- *   - Clickjacking
- *   - XSS attacks
- *   - MIME sniffing
+ * ✅ Security headers
  */
 app.use(helmet());
 
 /**
- * ✅ Disable Server Fingerprinting
- *
- * Removes:
- *   X-Powered-By: Express
+ * ✅ Hide Express signature (security best practice)
  */
 app.disable("x-powered-by");
 
 /**
- * ✅ Enable CORS
+ * ✅ Cross-Origin Resource Sharing
  */
 app.use(cors());
 
 /**
- * ✅ Parse JSON request bodies
+ * ✅ JSON body parser
  */
 app.use(express.json());
 
 
-/* ============================================================
-   🔐 ZERO-TRUST SECURITY GATEWAY
-   ============================================================ */
+// ============================================================
+// 🔐 ZERO-TRUST GATEWAY VALIDATION
+// ============================================================
 
 /**
  * 🎯 PURPOSE:
- *   Enforce that ONLY trusted Edge Gateway (Cloudflare Worker)
- *   can communicate with this backend service.
+ *
+ * Enforce that ONLY trusted Edge Gateway can access backend.
+ *
+ * ------------------------------------------------------------
  *
  * 🔬 THEORY:
  *
- * This implements a "Shared Secret Authentication" between:
+ * Implements shared-secret authentication:
  *
  *   Worker ↔ Backend
- *
- * The backend **rejects any direct request** that does not
- * contain a valid secret.
  *
  * ------------------------------------------------------------
  *
  * 📊 FLOW:
  *
- *   Request Arrives
+ *   Request arrives
  *        ↓
- *   Is it / (health)? → allow
+ *   Is it health endpoint?
  *        ↓
  *   Is environment production?
  *        ↓
- *   Validate secret header
+ *   Validate x-attendify-secret
  *        ↓
- *   Allow / Reject
- *
+ *   Allow or reject
  */
+
 app.use((req, res, next) => {
 
   /**
-   * ✅ Always allow health endpoint
+   * ✅ Health endpoint bypass
    */
   if (req.path === "/") {
     return next();
   }
 
   /**
-   * ✅ Allow all traffic in development
+   * ✅ Development mode bypass
    */
   if (process.env.NODE_ENV !== "production") {
     return next();
   }
 
   /**
-   * ✅ Extract secret from request header
+   * ✅ Extract secret header
    */
   const secret = req.headers["x-attendify-secret"];
 
   /**
-   * ✅ Validate against server-side secret
-   *
-   * If mismatch → reject immediately
+   * ✅ Validate secret
    */
   if (secret !== process.env.EDGE_SECRET) {
-
     return res.status(403).json({
       success: false,
       message: "Access denied (invalid gateway)"
@@ -196,52 +193,66 @@ app.use((req, res, next) => {
 });
 
 
-/* ============================================================
-   🌐 HEALTH CHECK ENDPOINT
-   ============================================================ */
+// ============================================================
+// 🌐 HEALTH CHECK ENDPOINT
+// ============================================================
 
 /**
  * ✅ GET /
  *
  * PURPOSE:
- *   - Check server liveness
- *   - Used by load balancers / monitoring tools
+ *   - System liveness probe
+ *   - Load balancer health check
  */
+
 app.get("/", (req, res) => {
 
   res.json({
     status: "OK",
-    message: "Attendify Backend Running 🚀"
+    system: "Attendify Backend",
+    uptime: process.uptime()
   });
 
 });
 
 
-/* ============================================================
-   🌐 ROUTE REGISTRATION
-   ============================================================ */
+// ============================================================
+// 🌐 ROUTE REGISTRATION
+// ============================================================
 
 /**
- * 📌 Modular structure:
+ * 📊 ROUTE MAPPING:
  *
- *   /auth     → authentication logic
- *   /company  → protected business logic
+ *   /auth       → Authentication (JWT)
+ *   /company    → Tenant management
+ *   /nonce      → Nonce issuance
+ *   /attendance → Cryptographic verification endpoint
  */
+
 app.use("/auth", authRoutes);
 app.use("/company", companyRoutes);
+app.use("/nonce", nonceRoutes);
+app.use("/attendance", attendanceRoutes);
 
 
-/* ============================================================
-   🛑 GLOBAL ERROR HANDLER
-   ============================================================ */
+// ============================================================
+// 🛑 GLOBAL ERROR HANDLER
+// ============================================================
 
 /**
- * 🎯 Captures all unhandled exceptions
+ * 🎯 PURPOSE:
  *
- * Prevents:
- *   - Server crash
- *   - Information leakage
+ * Centralized error handling layer
+ *
+ * ------------------------------------------------------------
+ *
+ * SECURITY:
+ *
+ *   ✅ Prevents stack trace leakage
+ *   ✅ Standardized responses
+ *   ✅ Protects internal system details
  */
+
 app.use((err, req, res, next) => {
 
   console.error("🔥 UNHANDLED ERROR:", err);
@@ -254,62 +265,57 @@ app.use((err, req, res, next) => {
 });
 
 
-/* ============================================================
-   🚀 STARTUP ORCHESTRATION
-   ============================================================ */
+// ============================================================
+// 🚀 SERVER STARTUP SEQUENCE
+// ============================================================
 
 /**
- * 🧠 STARTUP FLOW:
+ * 📊 INITIALIZATION FLOW:
  *
- *   Application Boot
+ *   Process boot
  *        ↓
- *   Connect to MongoDB
+ *   Connect to database
  *        ↓
- *   Inject database into Express context
+ *   Inject DB into app context
  *        ↓
- *   Bind network listener
+ *   Start HTTP server
  *
- * WHY?
- *   Avoid accepting requests before DB readiness
+ * ------------------------------------------------------------
+ *
+ * WHY:
+ *
+ * Avoid serving requests before DB readiness
  */
 
 async function startServer() {
 
   try {
 
-    console.log("🔄 Bootstrapping system...");
+    console.log("🔄 Initializing Attendify backend...");
 
     /**
-     * ✅ Step 1: Connect to database
+     * ✅ Step 1: Connect MongoDB
      */
     const db = await connectDB();
 
     /**
-     * ✅ Step 2: Inject DB layer globally
-     *
-     * Accessible via:
-     *   req.app.locals.db
+     * ✅ Step 2: Inject DB globally
      */
     app.locals.db = db;
 
     console.log("✅ Database connected");
 
     /**
-     * ✅ Step 3: Resolve port
+     * ✅ Step 3: Define port
      */
     const PORT = process.env.PORT || 3000;
 
     /**
-     * 🔥 CRITICAL:
-     *
-     * Must bind to 0.0.0.0 for cloud environments
-     *
-     * Otherwise:
-     *   → External traffic cannot reach server
+     * ✅ Bind to all interfaces (cloud requirement)
      */
     app.listen(PORT, "0.0.0.0", () => {
 
-      console.log("✅ Server started successfully");
+      console.log("✅ Server operational");
       console.log(`🌍 Listening on port ${PORT}`);
 
     });
@@ -317,59 +323,90 @@ async function startServer() {
   } catch (err) {
 
     console.error("❌ Startup failed:", err);
+
+    /**
+     * Fail fast (critical failure)
+     */
     process.exit(1);
   }
-
 }
 
+
 /**
- * ✅ Entry point execution
+ * 🟢 ENTRY POINT
  */
 startServer();
 
 
-/* ============================================================
-   📊 DETAILED REQUEST LIFECYCLE (ACADEMIC)
-   ============================================================ */
+// ============================================================
+// 📊 FULL SYSTEM FLOW (ACADEMIC MODEL)
+// ============================================================
 
 /**
- * 🔁 COMPLETE FLOW:
+ * 🔁 END-TO-END PIPELINE:
  *
- *   Client Request (Flutter / Postman)
+ *   Client Request
  *        ↓
  *   Cloudflare Worker
- *        ↓ (inject secret header)
- *   Express Server
+ *        ↓ (inject secret)
+ *   Backend Server
  *        ↓
- *   Security Middleware (validate secret)
+ *   Zero-Trust Middleware
  *        ↓
- *   Route Dispatcher (/auth, /company)
+ *   Route Handler
+ *
+ *   === AUTH ===
+ *   JWT issuance / validation
+ *
+ *   === NONCE ===
+ *   Generate time-bound nonce
+ *
+ *   === ATTENDANCE ===
+ *     → Canonicalize payload
+ *     → Verify signature
+ *     → Check nonce validity
+ *     → Detect replay attacks
+ *
  *        ↓
- *   JWT Middleware (if protected route)
- *        ↓
- *   Business Logic Handler
- *        ↓
- *   Database Query (MongoDB)
+ *   Decision (ACCEPT / REJECT)
  *        ↓
  *   JSON Response
- *
  */
 
 
-/* ============================================================
-   ⚡ SCALABILITY MODEL
-   ============================================================ */
+// ============================================================
+// 🔐 SECURITY GUARANTEES
+// ============================================================
 
 /**
- * ✅ Stateless API → horizontal scaling ready
- * ✅ Load balancer friendly
- * ✅ Edge-distributed via Cloudflare
- *
- * RESULT:
- *   Highly scalable cloud-native backend
+ * ✅ Strict access control (Edge-only access)
+ * ✅ Replay attack prevention
+ * ✅ Payload integrity enforcement
+ * ✅ Cryptographic verification
+ * ✅ Identity assurance (JWT)
  */
 
 
-/* ============================================================
-   🏁 END OF FILE
-   ============================================================ */
+// ============================================================
+// ⚡ SCALABILITY MODEL
+// ============================================================
+
+/**
+ * ✅ Stateless backend
+ * ✅ Horizontal scalability
+ * ✅ Load-balancer friendly
+ * ✅ Edge-distributed architecture
+ *
+ * ------------------------------------------------------------
+ *
+ * FUTURE EXTENSIONS:
+ *
+ *   → Redis (distributed nonce store)
+ *   → Rate limiting
+ *   → Observability (metrics/logging)
+ */
+
+
+// ============================================================
+// 🏁 END OF FILE
+// ============================================================

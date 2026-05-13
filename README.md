@@ -1,4 +1,3 @@
-
 # 📘 Attendify Backend System
 ## Distributed Multi-Tenant SaaS Authentication & Routing Platform
 
@@ -6,29 +5,27 @@
 
 # 🧭 1. System Overview
 
-Attendify is a distributed, cloud-native backend system designed to act as:
+Attendify is a **distributed, cloud-native backend system** designed as a:
 
-✅ A Company Identity Registry  
-✅ An Authentication Authority  
-✅ A Routing Layer between employees and company backends  
+- ✅ Company Identity Registry  
+- ✅ Authentication Authority  
+- ✅ Routing Gateway for employee → company backend communication  
 
 ---
 
 ## 🧠 Core Design Philosophy
 
-The system intentionally avoids managing employee data directly.
+Attendify follows a **strict separation of responsibilities**:
 
-Instead:
-
-- It manages company identities
-- It authenticates companies securely
-- It routes employees to company-specific backends
+- Identity management is centralized
+- Business data is decentralized
+- Routing is abstracted
 
 ---
 
 ## 🎯 Architectural Goal
 
-> Decouple identity, routing, and data ownership
+> Decouple identity, routing, and data ownership into independent, scalable layers.
 
 ---
 
@@ -38,9 +35,9 @@ Instead:
 
 \[ Flutter Client ]
 ↓
-\[ Cloudflare Worker (API Gateway) ]
+\[ Cloudflare Worker (Edge Gateway) ]
 ↓
-\[ Node.js Backend (Attendify Server) ]
+\[ Node.js Backend (Attendify Core) ]
 ↓
 \[ MongoDB Atlas (Company Registry) ]
 
@@ -50,10 +47,11 @@ Instead:
 
 ## 🔬 Architectural Characteristics
 
-- Stateless (JWT-based authentication)
+- Stateless authentication (JWT-based)
 - Multi-tenant isolation
 - Horizontally scalable
-- Cloud-native
+- Edge-accelerated routing (Cloudflare)
+- Zero-trust model
 
 ---
 
@@ -62,16 +60,16 @@ Instead:
 ## ✅ Company (Tenant)
 
 - Registers in Attendify
-- Receives secure identity (JWT + API Key)
-- Owns employee system externally
+- Receives identity credentials (JWT + API Key)
+- Owns and manages employees independently
 
 ---
 
 ## ✅ Employee (External Actor)
 
-- Uses mobile application
-- Provides company name
-- Gets routed to company backend
+- Uses mobile application (Flutter)
+- Inputs company identifier
+- Gets routed to company-specific backend
 
 ---
 
@@ -81,7 +79,7 @@ Instead:
 
 Employee → Attendify → Company Backend
 ↓
-Analytics (optional)
+(Optional Analytics Layer)
 
 ```
 
@@ -89,15 +87,17 @@ Analytics (optional)
 
 ## 🔐 Data Ownership Model
 
-Attendify enforces a strict data-minimization strategy:
+Attendify enforces **strict data minimization**:
 
-- Employee data is NEVER stored
-- All employee operations occur in company backend
-- Attendify acts only as identity + routing layer
+- ❌ No employee storage
+- ✅ Company-only identity registry
+- ✅ External backend ownership
 
-✅ Privacy compliant  
-✅ Reduced legal liability  
-✅ Scalable SaaS design  
+**Benefits:**
+
+- ✅ GDPR-friendly
+- ✅ Reduced legal liability
+- ✅ High scalability
 
 ---
 
@@ -132,68 +132,63 @@ companies
   "email": "email",
   "password": "hashed_password",
   "apiKey": "secure_random_key",
-  "createdAt": "timestamp"
+  "createdAt": "timestamp",
+  "status": "active|deleted",
+  "loginAttempts": 0,
+  "lockUntil": null
 }
 ````
 
 ***
 
-## 🔑 API Key Usage
-
-Each company is assigned a secure API key.
+## 🔑 API Key Design
 
 ### 🎯 Purpose
 
-*   Backend-to-backend communication
-*   Secure integration with external company systems
+*   Server-to-server authentication
+*   Integration with external company systems
 
 ***
 
-## 🔁 Integration Flow
+## 🔁 API Key Flow
 
     Company Backend → Attendify API
-                ↓
-    Include API Key
-                ↓
-    Server validates API key
-                ↓
-    Trusted request accepted
+            ↓
+    Include API Key in request
+            ↓
+    Backend validates key
+            ↓
+    Trusted execution
 
 ***
 
-## 🔒 API Key Scope
+## 🔒 Scope
 
-API keys are NOT used for user authentication.
+API keys are:
 
-They are strictly used for:
-
-*   Internal system integration
-*   Server-to-server communication
+*   ✅ NOT used for user authentication
+*   ✅ Used only for backend integration
 
 ***
 
 # 🔐 5. Authentication Architecture
 
-## ✅ Technologies
+## ✅ Stack
 
-*   JWT (JSON Web Token)
+*   JWT (JSON Web Tokens)
 *   bcrypt (password hashing)
 
 ***
 
 ## 🔑 Authentication Flow
 
-    Company registers
-       ↓
-    Password hashed (bcrypt)
-       ↓
-    Login request
-       ↓
-    Password verification
-       ↓
-    JWT generated
-       ↓
-    Token returned to client
+    Register → Hash Password → Store
+            ↓
+    Login → Verify Password
+            ↓
+    Generate JWT
+            ↓
+    Return token
 
 ***
 
@@ -203,237 +198,232 @@ They are strictly used for:
 
 ***
 
-## 🔐 Token Usage
+## 🔐 Usage
 
-    Authorization: Bearer TOKEN
+    Authorization: Bearer <JWT>
 
 ***
 
-# 📊 6. System Flow Diagrams
+# 🔐 6. Advanced Security Layer (Evidence System)
+
+## ✅ Components
+
+*   Cryptographic Signing (HMAC-SHA256)
+*   Nonce System (freshness)
+*   Replay Protection Store
+*   Deterministic Canonicalization
+
+***
+
+## 📊 Secure Request Flow
+
+    Client:
+      → generate nonce
+      → build payload
+      → canonicalize
+      → sign payload
+
+    Worker:
+      → inject secret header
+
+    Backend:
+      → validate secret
+      → verify signature
+      → validate nonce
+      → prevent replay
+
+***
+
+## 🔐 Security Guarantees
+
+*   ✅ Non-replayable requests
+*   ✅ Tamper detection
+*   ✅ Authentic client verification
+*   ✅ Deterministic validation
+
+***
+
+# 📊 7. Core System Flows
 
 ## 🧬 Registration
 
-    Client → /auth/register
-           → Validate input
-           → Hash password
-           → Store in DB
+    POST /auth/register
+     → validate input
+     → hash password
+     → store company
 
 ***
 
 ## 🧬 Login
 
-    Client → /auth/login
-           → Verify credentials
-           → Generate JWT
-           → Return token
+    POST /auth/login
+     → verify credentials
+     → generate JWT
+     → return token
 
 ***
 
-## 🧬 Protected Request
+## 🧬 Protected Access
 
-    Client → Authorization Header
-           → Middleware verifies JWT
-           → Access granted
+    Request → JWT Middleware → Authorized
 
 ***
 
 ## 🧬 Employee Routing
 
-    Employee → enters company name
-            ↓
-    GET /company/lookup
-            ↓
-    Company exists?
-            ↓
-    Return metadata
-            ↓
-    Connect to company backend
+    GET /company/lookup/:name
+     → check existence
+     → return minimal metadata
+     → client redirects to company backend
 
 ***
 
-# 🔄 7. End-to-End System Flow
+# 🔄 8. End-to-End Flow
 
-## Employee Interaction
+## Employee Journey
 
-1.  Employee opens app
-2.  Enters company name
-3.  Request sent to Attendify
-4.  Company existence validated
-5.  Client receives backend info
-6.  Connects to company backend
+1.  Open app
+2.  Enter company name
+3.  Request → Attendify
+4.  Validate company
+5.  Return routing info
+6.  Connect to company backend
 
 ***
 
-## Company Interaction
+## Company Journey
 
 1.  Register
 2.  Login
 3.  Receive JWT
-4.  Access protected API
+4.  Access system
 
 ***
 
 ## Integration Layer
 
-    Company Backend → Attendify → API Key Validation
+    Company Backend → API Key → Attendify
 
 ***
 
-# 🔄 8. Request Lifecycle
+# 🔄 9. Request Lifecycle
 
-    Client Request
-        ↓
-    Cloudflare Worker (Gateway)
-        ↓
-    Backend (Express)
-        ↓
-    Middleware (JWT/Auth)
-        ↓
+    Client
+      ↓
+    Cloudflare Worker
+      ↓
+    Express Backend
+      ↓
+    Zero-Trust Middleware
+      ↓
     Route Handler
-        ↓
-    Database (MongoDB)
-        ↓
+      ↓
+    Database
+      ↓
     Response
 
 ***
 
-# 🧩 9. Responsibility Matrix
+# 🧩 10. Responsibility Matrix
 
-| Component         | Responsibility           |
-| ----------------- | ------------------------ |
-| Flutter Client    | UI & user input          |
-| Cloudflare Worker | Routing & edge security  |
-| Backend (Node.js) | Authentication & logic   |
-| MongoDB           | Data storage             |
-| Company Backend   | Employee data management |
-
-***
-
-# 🔐 10. Trust Boundaries
-
-| Layer    | Trust Level   |
-| -------- | ------------- |
-| Client   | Untrusted     |
-| Worker   | Edge-trusted  |
-| Backend  | Trusted       |
-| Database | Fully trusted |
+| Component         | Responsibility                  |
+| ----------------- | ------------------------------- |
+| Flutter Client    | UI + request signing            |
+| Cloudflare Worker | Edge routing + gateway security |
+| Backend           | Auth + verification + logic     |
+| MongoDB           | Company storage                 |
+| Company Backend   | Employee data management        |
 
 ***
 
-## 🔐 Security Principle
+# 🔐 11. Trust Boundaries
 
-All external input is considered untrusted until validated by backend.
-
-***
-
-# 🔐 11. Security Architecture
-
-## Layers
-
-1.  HTTPS (transport security)
-2.  JWT authentication
-3.  bcrypt hashing
-4.  Input validation
+| Layer    | Trust Level     |
+| -------- | --------------- |
+| Client   | Untrusted       |
+| Worker   | Controlled Edge |
+| Backend  | Trusted         |
+| Database | Highly Trusted  |
 
 ***
 
-## ⚠️ Threat Model
+## 🔒 Security Principle
 
-| Threat              | Mitigation    |
-| ------------------- | ------------- |
-| Password leak       | bcrypt        |
-| Token tampering     | JWT signature |
-| Replay attack       | expiration    |
-| Unauthorized access | middleware    |
+> All input is untrusted until cryptographically verified.
 
 ***
 
-# ⚠️ 12. Failure Handling Strategy
+# 🔐 12. Threat Model
 
-*   400 → Bad Request
-*   401 → Unauthorized
-*   404 → Not Found
-*   409 → Conflict
-*   500 → Internal Error
-
-***
-
-## System Behavior
-
-✅ Non-crashing  
-✅ Controlled responses  
-✅ Errors isolated
+| Threat              | Mitigation               |
+| ------------------- | ------------------------ |
+| Password leaks      | bcrypt hashing           |
+| Token tampering     | JWT signature            |
+| Replay attacks      | nonce + replay store     |
+| MITM tampering      | HMAC signature           |
+| Unauthorized access | middleware + Edge Secret |
 
 ***
 
-# ⚡ 13. Performance Considerations
+# ⚠️ 13. Failure Strategy
+
+| Code | Meaning        |
+| ---- | -------------- |
+| 400  | Bad request    |
+| 401  | Unauthorized   |
+| 403  | Forbidden      |
+| 404  | Not found      |
+| 409  | Conflict       |
+| 500  | Internal error |
+
+***
+
+# ⚡ 14. Performance Model
 
 *   Stateless architecture
-*   Lightweight responses
-*   Index recommended on:
-    *   name
-    *   email
+*   O(1) nonce checks
+*   Lightweight payloads
+*   Indexed queries (email, name)
 
 ***
 
-# 🧠 14. Multi-Tenant Design
+# 🧠 15. Multi-Tenant Isolation
 
-Each company is uniquely identified by:
+Each tenant is identified by:
 
-    company.id (JWT payload)
-
-***
-
-## Result
-
-✅ Secure isolation  
-✅ No cross-tenant access
+    company.id
 
 ***
 
-# 🌐 15. Deployment Model
+## ✅ Result
 
-## Backend
-
-    Railway
-
-## API Gateway
-
-    Cloudflare Workers
-
-## Database
-
-    MongoDB Atlas
+*   ✅ No cross-tenant access
+*   ✅ Strong isolation
+*   ✅ Scalable architecture
 
 ***
 
-# 📡 16. API Contract
+# 🌐 16. Deployment Model
 
-## Register
+| Component | Platform           |
+| --------- | ------------------ |
+| Backend   | Railway            |
+| Gateway   | Cloudflare Workers |
+| Database  | MongoDB Atlas      |
+
+***
+
+# 📡 17. API Contract
 
     POST /auth/register
-
-## Login
-
     POST /auth/login
-
-## Profile
-
-    GET /company/profile
-
-***
-
-# 🔄 17. Authentication Sequence
-
-    Client → /login
-    Backend → DB
-    DB → Backend
-    Backend → JWT
-    JWT → Client
-
-    Client → Protected Route
-    Middleware → Verify JWT
-    Route → Response
+    GET  /company/profile
+    GET  /company/me
+    GET  /company/lookup/:name
+    PUT  /company/update
+    DELETE /company/delete
+    POST /attendance
+    GET  /nonce
 
 ***
 
@@ -441,38 +431,38 @@ Each company is uniquely identified by:
 
 *   No employee storage
 *   Only company identity
-*   External data ownership
+*   Externalized data ownership
 
 ***
 
-# 🧠 19. Architectural Classification
+# 🧠 19. System Classification
 
-This system is:
+Attendify is:
 
-✅ Distributed System  
-✅ SaaS Platform  
-✅ Multi-Tenant Backend  
-✅ Identity & Routing Service
+*   ✅ SaaS Platform
+*   ✅ Distributed System
+*   ✅ Identity Service
+*   ✅ Secure API Gateway Layer
 
 ***
 
 # 🔮 20. Future Enhancements
 
-*   Refresh tokens
-*   Rate limiting
-*   RBAC
-*   Monitoring
-*   Analytics ingestion
+*   ✅ Refresh tokens
+*   ✅ Rate limiting (edge + backend)
+*   ✅ RBAC system
+*   ✅ Observability (logs + metrics)
+*   ✅ Distributed cache (Redis)
 
 ***
 
 # 🏁 Conclusion
 
-Attendify is a modern SaaS backend designed for:
+Attendify represents a **modern, production-grade SaaS architecture** optimized for:
 
 *   Security-first operation
-*   Distributed scalability
-*   Multi-tenant isolation
+*   Global scalability
+*   Clear separation of responsibilities
 
 ***
 
