@@ -85,7 +85,7 @@ paths:
 
   /auth/register:
     post:
-      tags:
+      tags: 
         - Auth
       operationId: registerCompany
       summary: Register a new company
