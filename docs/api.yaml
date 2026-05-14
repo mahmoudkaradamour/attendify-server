@@ -1,3 +1,57 @@
+# ============================================================
+# Attendify API - OpenAPI Specification
+# ============================================================
+#
+# PURPOSE:
+#
+# This file defines the formal HTTP API contract for Attendify.
+#
+# It is not only documentation. It is a machine-readable contract
+# that can be used by:
+#
+#   - Swagger UI
+#   - API clients
+#   - SDK generators
+#   - QA testers
+#   - Backend developers
+#   - Frontend developers
+#   - Integration partners
+#
+# ------------------------------------------------------------
+#
+# SYSTEM POSITION:
+#
+#   Client Application
+#        ↓
+#   Cloudflare Worker Gateway
+#        ↓
+#   Attendify Backend
+#        ↓
+#   MongoDB Atlas
+#
+# ------------------------------------------------------------
+#
+# SECURITY MODEL:
+#
+#   - Public clients call the Cloudflare Worker URL.
+#   - The Worker forwards requests to the backend.
+#   - The Worker injects x-attendify-secret internally.
+#   - The backend rejects direct traffic without the secret.
+#   - Protected company routes require JWT Bearer authentication.
+#   - Attendance submission requires HMAC + Nonce verification.
+#
+# ------------------------------------------------------------
+#
+# IMPORTANT:
+#
+# Do not place secrets inside this file.
+#
+# This file may contain public URLs and example payloads only.
+# Secrets such as JWT_SECRET, EDGE_SECRET, APP_SECRET, and MONGO_URL
+# must stay in environment variables.
+#
+# ============================================================
+
 openapi: 3.0.3
 
 info:
@@ -33,8 +87,32 @@ info:
       Clients should use the Cloudflare Worker URL as the public API entry point.
       The Railway backend URL should not be used directly by clients.
 
+    Authentication rule:
+
+      Protected endpoints require:
+
+        Authorization: Bearer TOKEN_VALUE
+
+    Attendance security rule:
+
+      The attendance example in this document is illustrative only.
+      A valid attendance request must use a fresh nonce from GET /nonce
+      and a real HMAC-SHA256 signature over the canonicalized payload.
+
   license:
     name: Private / Internal Use
+
+# ============================================================
+# SERVERS
+# ============================================================
+#
+# Local development points directly to the local Express server.
+# Production points to the Cloudflare Worker, not to Railway.
+#
+# This is intentional. The Worker is the public API boundary.
+# The backend is protected by EDGE_SECRET validation.
+#
+# ============================================================
 
 servers:
   - url: http://localhost:3000
@@ -42,6 +120,26 @@ servers:
 
   - url: https://attendify-worker.mahmouddamour-3aa.workers.dev
     description: Production Edge Gateway
+
+# ============================================================
+# TAGS
+# ============================================================
+#
+# Tags group endpoints by domain responsibility.
+#
+# Auth:
+#   Registration and login.
+#
+# Company:
+#   Company profile, company data, lookup, update, and delete.
+#
+# Security:
+#   Nonce generation and health endpoint.
+#
+# Attendance:
+#   Signed attendance evidence submission.
+#
+# ============================================================
 
 tags:
   - name: Auth
@@ -51,12 +149,25 @@ tags:
     description: Company profile, full company data, lookup, update, and soft delete operations.
 
   - name: Security
-    description: Nonce issuance and cryptographic request protection.
+    description: Nonce issuance, health checks, and cryptographic security support.
 
   - name: Attendance
     description: Secure attendance submission using signed payloads, nonce validation, and replay protection.
 
 paths:
+
+  # ============================================================
+  # HEALTH CHECK
+  # ============================================================
+  #
+  # This endpoint verifies that the backend is alive.
+  #
+  # It is intentionally public and useful for:
+  #   - Monitoring
+  #   - Load balancer checks
+  #   - Deployment verification
+  #
+  # ============================================================
 
   /:
     get:
@@ -68,9 +179,11 @@ paths:
         Returns backend liveness information.
 
         This endpoint is intentionally public and can be used by:
+
           - Cloud monitoring tools
           - Load balancers
           - Deployment verification scripts
+
       responses:
         "200":
           description: Server is healthy
@@ -83,9 +196,21 @@ paths:
                 system: Attendify Backend
                 uptime: 123.45
 
+  # ============================================================
+  # AUTH - REGISTER
+  # ============================================================
+  #
+  # Creates a new company tenant account.
+  #
+  # Password handling:
+  #   Plaintext password is accepted only in the request body.
+  #   It must be hashed by the backend before storage.
+  #
+  # ============================================================
+
   /auth/register:
     post:
-      tags: 
+      tags:
         - Auth
       operationId: registerCompany
       summary: Register a new company
@@ -98,6 +223,7 @@ paths:
           - Password is hashed using bcrypt.
           - Duplicate company email registration is rejected.
           - Plaintext passwords are never stored.
+
       requestBody:
         required: true
         content:
@@ -111,6 +237,7 @@ paths:
                   name: acme
                   email: admin@acme.com
                   password: strongpassword
+
       responses:
         "200":
           description: Company registered successfully
@@ -132,6 +259,16 @@ paths:
                 success: false
                 message: Invalid input data
 
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
+
         "409":
           description: Company already exists
           content:
@@ -152,6 +289,20 @@ paths:
                 success: false
                 message: Internal server error
 
+  # ============================================================
+  # AUTH - LOGIN
+  # ============================================================
+  #
+  # Authenticates a company and returns a signed JWT.
+  #
+  # The returned JWT is used by protected company endpoints.
+  #
+  # Header format:
+  #
+  #   Authorization: Bearer TOKEN_VALUE
+  #
+  # ============================================================
+
   /auth/login:
     post:
       tags:
@@ -169,7 +320,8 @@ paths:
 
         Header usage:
 
-          Authorization: Bearer <JWT>
+          Authorization: Bearer TOKEN_VALUE
+
       requestBody:
         required: true
         content:
@@ -182,6 +334,7 @@ paths:
                 value:
                   email: admin@acme.com
                   password: strongpassword
+
       responses:
         "200":
           description: Authentication successful
@@ -214,14 +367,22 @@ paths:
                 message: Invalid credentials
 
         "403":
-          description: Account temporarily locked
+          description: Account temporarily locked or invalid gateway
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-              example:
-                success: false
-                message: Account temporarily locked
+              examples:
+                accountLocked:
+                  summary: Account temporarily locked
+                  value:
+                    success: false
+                    message: Account temporarily locked
+                invalidGateway:
+                  summary: Invalid gateway
+                  value:
+                    success: false
+                    message: Access denied invalid gateway
 
         "404":
           description: Company not found
@@ -239,6 +400,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # COMPANY - PROFILE
+  # ============================================================
+  #
+  # Returns company identity derived from JWT.
+  #
+  # This endpoint does not require a DB lookup if the middleware
+  # stores the identity directly in req.company.
+  #
+  # ============================================================
 
   /company/profile:
     get:
@@ -250,8 +425,10 @@ paths:
         Returns lightweight company identity extracted directly from the verified JWT token.
 
         This endpoint is optimized for fast identity checks and does not require a database lookup.
+
       security:
         - bearerAuth: []
+
       responses:
         "200":
           description: Company profile returned
@@ -271,9 +448,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-              example:
-                success: false
-                message: Unauthorized
+              examples:
+                missingAuthorization:
+                  summary: Missing Authorization header
+                  value:
+                    success: false
+                    message: Authorization header missing
+                invalidToken:
+                  summary: Invalid or expired token
+                  value:
+                    success: false
+                    message: Unauthorized
 
         "403":
           description: Invalid gateway or direct backend access
@@ -281,6 +466,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
+
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # COMPANY - ME
+  # ============================================================
+  #
+  # Returns full company data from MongoDB.
+  #
+  # Sensitive fields must be sanitized before response.
+  #
+  # ============================================================
 
   /company/me:
     get:
@@ -292,8 +500,10 @@ paths:
         Returns the full company document from the database.
 
         Sensitive fields such as password and apiKey must not be returned in the response.
+
       security:
         - bearerAuth: []
+
       responses:
         "200":
           description: Full company data returned
@@ -318,6 +528,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Authorization header missing
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
 
         "404":
           description: Company not found
@@ -325,6 +548,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Company not found
 
         "500":
           description: Internal server error
@@ -332,6 +558,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # COMPANY - UPDATE
+  # ============================================================
+  #
+  # Allows controlled company updates.
+  #
+  # Uses a whitelist model:
+  #   - name
+  #   - email
+  #
+  # Protected fields are not accepted.
+  #
+  # ============================================================
 
   /company/update:
     put:
@@ -355,8 +598,10 @@ paths:
           - status
           - loginAttempts
           - lockUntil
+
       security:
         - bearerAuth: []
+
       requestBody:
         required: true
         content:
@@ -366,6 +611,7 @@ paths:
             example:
               name: acme-updated
               email: updated@acme.com
+
       responses:
         "200":
           description: Company updated successfully
@@ -393,6 +639,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Authorization header missing
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
 
         "500":
           description: Internal server error
@@ -400,6 +659,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # COMPANY - DELETE
+  # ============================================================
+  #
+  # Performs soft delete.
+  #
+  # Soft delete preserves auditability and recovery options.
+  #
+  # ============================================================
 
   /company/delete:
     delete:
@@ -415,8 +687,10 @@ paths:
           - Auditability
           - Recovery
           - Historical tracking
+
       security:
         - bearerAuth: []
+
       responses:
         "200":
           description: Company soft deleted
@@ -434,6 +708,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Authorization header missing
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
 
         "500":
           description: Internal server error
@@ -441,6 +728,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # COMPANY - PUBLIC LOOKUP
+  # ============================================================
+  #
+  # Public route.
+  #
+  # Used by clients to check whether a company exists.
+  #
+  # Returns minimal metadata only.
+  #
+  # ============================================================
 
   /company/lookup/{name}:
     get:
@@ -453,6 +755,7 @@ paths:
 
         This endpoint returns minimal safe metadata only.
         It must not return sensitive fields such as email, password, apiKey, or internal security metadata.
+
       parameters:
         - name: name
           in: path
@@ -462,6 +765,7 @@ paths:
             type: string
             minLength: 1
           example: acme
+
       responses:
         "200":
           description: Lookup result
@@ -488,6 +792,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Invalid company name
+
+        "403":
+          description: Invalid gateway or direct backend access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
 
         "500":
           description: Internal server error
@@ -495,6 +812,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+  # ============================================================
+  # SECURITY - NONCE
+  # ============================================================
+  #
+  # Issues a fresh nonce.
+  #
+  # Nonce is used to:
+  #   - prevent replay
+  #   - bind signatures to time windows
+  #   - enforce request freshness
+  #
+  # ============================================================
 
   /nonce:
     get:
@@ -512,6 +845,7 @@ paths:
           - Bind a signed request to a short validity window
 
         The client should request a new nonce before submitting a signed attendance payload.
+
       responses:
         "200":
           description: Nonce generated successfully
@@ -532,6 +866,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Access denied invalid gateway
 
         "500":
           description: Failed to generate nonce
@@ -542,6 +879,21 @@ paths:
               example:
                 success: false
                 message: Failed to generate nonce
+
+  # ============================================================
+  # ATTENDANCE
+  # ============================================================
+  #
+  # Receives signed attendance evidence.
+  #
+  # Important:
+  #   The example payload is illustrative only.
+  #   It cannot pass verification unless:
+  #     - nonce is freshly issued
+  #     - payload is canonicalized
+  #     - signature is real HMAC-SHA256
+  #
+  # ============================================================
 
   /attendance:
     post:
@@ -568,11 +920,18 @@ paths:
           4. Sign canonical payload using HMAC-SHA256
           5. POST /attendance
 
+        Important execution note:
+
+          The example nonce and signature below are illustrative only.
+          A real request must use a fresh nonce from GET /nonce and
+          a valid HMAC-SHA256 signature generated over the canonical payload.
+
         Security result:
 
           - Modified payloads are rejected.
           - Replayed payloads are rejected.
           - Expired nonce payloads are rejected.
+
       requestBody:
         required: true
         content:
@@ -591,6 +950,7 @@ paths:
                   issuedAt: 1710000000000
                   expiresAt: 1710000300000
               signature: 1f2a9c4e8b88adcc71b7e40f6f0d8d0d8f1e4e9c5a3b2c1d0e9f8a7b6c5d4e3f
+
       responses:
         "200":
           description: Attendance accepted
@@ -636,7 +996,7 @@ paths:
                     success: false
                     message: Replay attack detected
                 expiredNonce:
-                  summary: Expired nonce
+                  summary: Expired or invalid nonce
                   value:
                     success: false
                     message: Nonce expired or invalid
@@ -657,6 +1017,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: Internal server error
+
+# ============================================================
+# COMPONENTS
+# ============================================================
+#
+# Reusable OpenAPI components.
+#
+# Schemas below define:
+#   - request contracts
+#   - response contracts
+#   - authentication models
+#   - security payload models
+#
+# ============================================================
 
 components:
 
@@ -670,7 +1047,7 @@ components:
 
         Usage:
 
-          Authorization: Bearer <token>
+          Authorization: Bearer TOKEN_VALUE
 
   schemas:
 
@@ -818,10 +1195,9 @@ components:
           type: integer
           example: 0
         lockUntil:
+          type: number
           nullable: true
-          oneOf:
-            - type: number
-            - type: "null"
+          description: Unix timestamp in milliseconds when the temporary account lock expires, or null when the account is not locked.
           example: null
 
     CompanyUpdateRequest:
@@ -845,21 +1221,16 @@ components:
           type: boolean
           example: true
         company:
+          type: object
           nullable: true
-          oneOf:
-            - $ref: "#/components/schemas/PublicCompany"
-            - type: "null"
-
-    PublicCompany:
-      type: object
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-          example: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
-        name:
-          type: string
-          example: acme
+          additionalProperties: false
+          properties:
+            id:
+              type: string
+              example: 4d370664-dc1d-4b3a-9d42-ad30b67053b6
+            name:
+              type: string
+              example: acme
 
     NonceResponse:
       type: object
