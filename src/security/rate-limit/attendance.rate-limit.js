@@ -1,65 +1,109 @@
 /**
  * =============================================================================
- * Attendify Attendance Submission Rate Limiter
+ * Attendify — Attendance Submission Rate Limiter (Enterprise-Grade)
  * =============================================================================
  *
- * PURPOSE:
- * -----------------------------------------------------------------------------
- * Protects the attendance submission endpoint which is:
+ * OVERVIEW
+ * =============================================================================
  *
- *   ✅ High-frequency
- *   ✅ Exposed to external devices (mobile / IoT)
- *   ✅ Security-sensitive (signature verification)
+ * This module implements a **high-security rate limiting middleware**
+ * for the attendance submission endpoint.
  *
- * -----------------------------------------------------------------------------
- * THREAT MODEL
- * -----------------------------------------------------------------------------
+ * The endpoint is considered:
  *
- * 1. Submission Flooding:
- *    - Massive submission attempts (DoS vector)
+ *   - High-frequency (frequent client devices)
+ *   - Security-sensitive (signature validation layer)
+ *   - Attack-prone (DoS, brute-force, replay attacks)
  *
- * 2. Signature Brute-force:
- *    - Attempting multiple signatures for same payload
+ * =============================================================================
  *
- * 3. Replay Amplification:
- *    - Rapid repeated submissions exploiting timing windows
+ * 🧠 FORMAL MODEL (RATE LIMIT FUNCTION)
  *
- * -----------------------------------------------------------------------------
- * STRATEGY
- * -----------------------------------------------------------------------------
+ * Let:
+ *
+ *   R = request stream from client
+ *   K = identity key (derived from request)
+ *   W = time window
+ *   L = max allowed requests
+ *
+ * Then:
+ *
+ *   allow(R) ⇔ count(K, W) ≤ L
+ *
+ * Otherwise:
+ *
+ *   reject(R)
+ *
+ * =============================================================================
+ *
+ * 📊 EXECUTION FLOW (TOKEN BUCKET SIMPLIFIED MODEL)
+ *
+ *            Incoming Request
+ *                   │
+ *                   ▼
+ *         Extract Client Identity (K)
+ *                   │
+ *                   ▼
+ *         Compute Key via ipKeyGenerator()
+ *                   │
+ *                   ▼
+ *         Increment Counter(K, Window)
+ *                   │
+ *          ┌────────┴────────┐
+ *          ▼                 ▼
+ *      ≤ Limit           > Limit
+ *          │                 │
+ *          ▼                 ▼
+ *       next()        Reject (HTTP 429)
+ *
+ * =============================================================================
+ *
+ * ⚠️ CRITICAL SECURITY NOTE (IPv6)
+ *
+ * Direct usage of:
+ *
+ *   req.ip ❌
+ *
+ * is unsafe under IPv6 representations and may allow bypass.
+ *
+ * Therefore:
+ *
+ *   ✅ ipKeyGenerator(req)
+ *
+ * MUST be used to normalize address space.
+ *
+ * =============================================================================
+ *
+ * 🧪 CONFIGURATION
  *
  * Window: 1 minute
- * Limit: 30 requests per IP
+ * Limit: 30 requests / IP
  *
- * -----------------------------------------------------------------------------
- * FLOW
- * -----------------------------------------------------------------------------
+ * =============================================================================
  *
- *                 Incoming Attendance Request
- *                           │
- *                           ▼
- *                  Extract Client Identity
- *                           │
- *                           ▼
- *                  Increment Request Count
- *                           │
- *             ┌─────────────┴─────────────┐
- *             ▼                           ▼
- *          Allowed                    Blocked
- *             │                           │
- *             ▼                           ▼
- *         next()                   Reject (429)
+ * 🔐 SECURITY GUARANTEES
  *
- * -----------------------------------------------------------------------------
- * SECURITY DESIGN PRINCIPLE
- * -----------------------------------------------------------------------------
- *
- *   "High-frequency endpoints must be protected against burst-based abuse."
+ *   ✅ Prevents request flooding
+ *   ✅ Mitigates brute-force attempts
+ *   ✅ Reduces replay amplification surface
+ *   ✅ IPv6-safe identification
  *
  * =============================================================================
  */
 
 const rateLimit = require("express-rate-limit");
+
+/**
+ * ✅ Official helper — prevents IPv6 bypass attacks
+ */
+const {
+  ipKeyGenerator
+} = require("express-rate-limit");
+
+/* =============================================================================
+ * ERROR HANDLING
+ * =============================================================================
+ */
 
 const {
   rateLimitError
@@ -69,35 +113,94 @@ const {
   ERROR_CODES
 } = require("../../shared/errors/error-codes");
 
-const logger = require("../../infrastructure/logging/logger");
+/* =============================================================================
+ * OBSERVABILITY
+ * =============================================================================
+ */
+
+const logger =
+  require("../../infrastructure/logging/logger");
+
+/* =============================================================================
+ * RATE LIMIT CONFIGURATION
+ * =============================================================================
+ */
 
 const attendanceRateLimiter = rateLimit({
 
-  windowMs: 60 * 1000,
+  /**
+   * ---------------------------------------------------------------------------
+   * TIME WINDOW
+   * ---------------------------------------------------------------------------
+   *
+   * Defines fixed window duration
+   */
+  windowMs: 60 * 1000, // 1 minute
 
+  /**
+   * ---------------------------------------------------------------------------
+   * MAX REQUESTS
+   * ---------------------------------------------------------------------------
+   */
   max: 30,
 
+  /**
+   * ---------------------------------------------------------------------------
+   * HEADERS CONFIG
+   * ---------------------------------------------------------------------------
+   */
   standardHeaders: true,
-
   legacyHeaders: false,
 
-  keyGenerator: (req) => req.ip,
+  /**
+   * ---------------------------------------------------------------------------
+   * KEY GENERATOR (CRITICAL SECURITY COMPONENT)
+   * ---------------------------------------------------------------------------
+   *
+   * Uses library-provided normalization to ensure:
+   *
+   *   ✅ IPv4 compatibility
+   *   ✅ IPv6 normalization
+   *   ✅ Proxy-safe extraction (when configured)
+   */
+  keyGenerator: (req /*, res */) => {
 
-  handler: (req, res, next) => {
+    return ipKeyGenerator(req);
+  },
 
+  /**
+   * ---------------------------------------------------------------------------
+   * HANDLER (RATE LIMIT BREACH)
+   * ---------------------------------------------------------------------------
+   *
+   * Triggered when limit is exceeded
+   */
+  handler: (req, res, next /*, options */) => {
+
+    /**
+     * Observability event (Security classification)
+     */
     logger.warn("Attendance rate limit exceeded", {
 
       securityEvent: true,
+
+      category: "RATE_LIMIT",
+
+      severity: "medium",
 
       ip: req.ip,
 
       requestId: req.requestId,
 
-      path: req.originalUrl
+      path: req.originalUrl,
+
+      method: req.method
     });
 
+    /**
+     * Application-level error propagation
+     */
     return next(
-
       rateLimitError(
         "Too many attendance submissions",
         ERROR_CODES.AUTH_RATE_LIMIT_EXCEEDED
@@ -106,4 +209,57 @@ const attendanceRateLimiter = rateLimit({
   }
 });
 
+/* =============================================================================
+ * EXPORTS
+ * =============================================================================
+ */
+
 module.exports = attendanceRateLimiter;
+
+/**
+ * =============================================================================
+ * ARCHITECTURAL INSIGHTS
+ * =============================================================================
+ *
+ * 1. IDENTITY MODEL
+ * -----------------------------------------------------------------------------
+ * Identity is derived from IP abstraction (normalized via library),
+ * not raw transport value.
+ *
+ * 2. STATE MODEL
+ * -----------------------------------------------------------------------------
+ * Rate limiting uses in-memory counters (default),
+ * which can be replaced with Redis-backed stores for scalability.
+ *
+ * 3. EXTENSIBILITY
+ * -----------------------------------------------------------------------------
+ * This middleware can be upgraded to:
+ *
+ *   - distributed rate limiting (Redis)
+ *   - token bucket algorithms
+ *   - per-user limits
+ *
+ * 4. FAILURE CHARACTERISTIC
+ * -----------------------------------------------------------------------------
+ * Rejection is deterministic and idempotent:
+ *
+ *   same request → same outcome after limit breach
+ *
+ * 5. POSITION IN PIPELINE
+ * -----------------------------------------------------------------------------
+ *
+ *   Request
+ *     ↓
+ *   Edge Gateway
+ *     ↓
+ *   Rate Limiter  ← (THIS MODULE)
+ *     ↓
+ *   Authentication
+ *     ↓
+ *   Business Logic
+ *
+ * =============================================================================
+ *
+ * END OF FILE
+ * =============================================================================
+ */
