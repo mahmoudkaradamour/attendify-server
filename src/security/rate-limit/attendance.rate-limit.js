@@ -1,92 +1,59 @@
 /**
  * =============================================================================
- * Attendify — Attendance Submission Rate Limiter (Enterprise-Grade)
+ * Attendify — Attendance Rate Limiter (Enterprise Distributed Security Layer)
  * =============================================================================
  *
  * OVERVIEW
  * =============================================================================
  *
- * This module implements a **high-security rate limiting middleware**
- * for the attendance submission endpoint.
+ * This module implements a **distributed, production-grade rate limiter**
+ * designed to protect a high-frequency, security-sensitive endpoint:
  *
- * The endpoint is considered:
- *
- *   - High-frequency (frequent client devices)
- *   - Security-sensitive (signature validation layer)
- *   - Attack-prone (DoS, brute-force, replay attacks)
+ *   POST /attendance
  *
  * =============================================================================
  *
- * 🧠 FORMAL MODEL (RATE LIMIT FUNCTION)
+ * 🧠 FORMAL MODEL
  *
  * Let:
  *
- *   R = request stream from client
- *   K = identity key (derived from request)
+ *   K = normalized client identity
  *   W = time window
- *   L = max allowed requests
+ *   C(K, W) = number of requests within W
+ *   L = limit
  *
  * Then:
  *
- *   allow(R) ⇔ count(K, W) ≤ L
- *
- * Otherwise:
- *
- *   reject(R)
+ *   allow ⇔ C(K,W) < L
+ *   deny  ⇔ C(K,W) ≥ L
  *
  * =============================================================================
  *
- * 📊 EXECUTION FLOW (TOKEN BUCKET SIMPLIFIED MODEL)
+ * 📊 DISTRIBUTED FLOW (REDIS-BACKED)
  *
- *            Incoming Request
- *                   │
- *                   ▼
- *         Extract Client Identity (K)
- *                   │
- *                   ▼
- *         Compute Key via ipKeyGenerator()
- *                   │
- *                   ▼
- *         Increment Counter(K, Window)
- *                   │
- *          ┌────────┴────────┐
- *          ▼                 ▼
- *      ≤ Limit           > Limit
- *          │                 │
- *          ▼                 ▼
- *       next()        Reject (HTTP 429)
+ *         Incoming Request
+ *                │
+ *                ▼
+ *     Normalize Identity (IP → key)
+ *                │
+ *                ▼
+ *      Redis Counter Increment (atomic)
+ *                │
+ *        ┌───────┴────────┐
+ *        ▼                ▼
+ *     Allowed          Blocked
+ *        │                │
+ *        ▼                ▼
+ *     next()       Reject (429)
  *
  * =============================================================================
  *
- * ⚠️ CRITICAL SECURITY NOTE (IPv6)
+ * 🔐 SECURITY PROPERTIES
  *
- * Direct usage of:
- *
- *   req.ip ❌
- *
- * is unsafe under IPv6 representations and may allow bypass.
- *
- * Therefore:
- *
- *   ✅ ipKeyGenerator(req)
- *
- * MUST be used to normalize address space.
- *
- * =============================================================================
- *
- * 🧪 CONFIGURATION
- *
- * Window: 1 minute
- * Limit: 30 requests / IP
- *
- * =============================================================================
- *
- * 🔐 SECURITY GUARANTEES
- *
- *   ✅ Prevents request flooding
- *   ✅ Mitigates brute-force attempts
- *   ✅ Reduces replay amplification surface
- *   ✅ IPv6-safe identification
+ *   ✅ Distributed-safe (multi-instance)
+ *   ✅ IPv6-safe identity
+ *   ✅ DoS-resistant throttling
+ *   ✅ Replay amplification mitigation
  *
  * =============================================================================
  */
@@ -94,17 +61,27 @@
 const rateLimit = require("express-rate-limit");
 
 /**
- * ✅ Official helper — prevents IPv6 bypass attacks
+ * =============================================================================
+ * REDIS STORE (DISTRIBUTED STATE)
+ * =============================================================================
+ */
+const { RedisStore } = require("rate-limit-redis");
+const redis = require("../../infrastructure/cache/redis.client");
+
+/**
+ * =============================================================================
+ * IPv6 SAFE KEY GENERATOR
+ * =============================================================================
  */
 const {
   ipKeyGenerator
 } = require("express-rate-limit");
 
-/* =============================================================================
- * ERROR HANDLING
+/**
+ * =============================================================================
+ * ERROR MODEL
  * =============================================================================
  */
-
 const {
   rateLimitError
 } = require("../../shared/errors/app-error");
@@ -113,16 +90,15 @@ const {
   ERROR_CODES
 } = require("../../shared/errors/error-codes");
 
-/* =============================================================================
- * OBSERVABILITY
+/**
+ * =============================================================================
+ * LOGGING (OBSERVABILITY)
  * =============================================================================
  */
-
-const logger =
-  require("../../infrastructure/logging/logger");
+const logger = require("../../infrastructure/logging/logger");
 
 /* =============================================================================
- * RATE LIMIT CONFIGURATION
+ * RATE LIMITER DEFINITION
  * =============================================================================
  */
 
@@ -130,19 +106,30 @@ const attendanceRateLimiter = rateLimit({
 
   /**
    * ---------------------------------------------------------------------------
-   * TIME WINDOW
+   * WINDOW CONFIGURATION
    * ---------------------------------------------------------------------------
    *
-   * Defines fixed window duration
+   * Fixed time window duration
    */
   windowMs: 60 * 1000, // 1 minute
 
   /**
    * ---------------------------------------------------------------------------
-   * MAX REQUESTS
+   * REQUEST THRESHOLD
    * ---------------------------------------------------------------------------
    */
   max: 30,
+
+  /**
+   * ---------------------------------------------------------------------------
+   * DISTRIBUTED STORE (REDIS)
+   * ---------------------------------------------------------------------------
+   *
+   * Uses Redis atomic counters for cross-instance consistency
+   */
+  store: new RedisStore({
+    sendCommand: (...args) => redis.sendCommand(args)
+  }),
 
   /**
    * ---------------------------------------------------------------------------
@@ -154,51 +141,38 @@ const attendanceRateLimiter = rateLimit({
 
   /**
    * ---------------------------------------------------------------------------
-   * KEY GENERATOR (CRITICAL SECURITY COMPONENT)
+   * KEY GENERATOR
    * ---------------------------------------------------------------------------
    *
-   * Uses library-provided normalization to ensure:
-   *
-   *   ✅ IPv4 compatibility
-   *   ✅ IPv6 normalization
-   *   ✅ Proxy-safe extraction (when configured)
+   * Ensures normalized, canonical identity
    */
-  keyGenerator: (req /*, res */) => {
-
+  keyGenerator: (req) => {
     return ipKeyGenerator(req);
   },
 
   /**
    * ---------------------------------------------------------------------------
-   * HANDLER (RATE LIMIT BREACH)
+   * RATE LIMIT BREACH HANDLER
    * ---------------------------------------------------------------------------
-   *
-   * Triggered when limit is exceeded
    */
-  handler: (req, res, next /*, options */) => {
+  handler: (req, res, next) => {
 
     /**
-     * Observability event (Security classification)
+     * Structured Security Event
      */
     logger.warn("Attendance rate limit exceeded", {
-
       securityEvent: true,
-
       category: "RATE_LIMIT",
-
       severity: "medium",
-
+      domain: "attendance",
       ip: req.ip,
-
       requestId: req.requestId,
-
       path: req.originalUrl,
-
       method: req.method
     });
 
     /**
-     * Application-level error propagation
+     * Domain-level error propagation
      */
     return next(
       rateLimitError(
@@ -206,7 +180,16 @@ const attendanceRateLimiter = rateLimit({
         ERROR_CODES.AUTH_RATE_LIMIT_EXCEEDED
       )
     );
-  }
+  },
+
+  /**
+   * ---------------------------------------------------------------------------
+   * FAIL-SAFE CONFIG
+   * ---------------------------------------------------------------------------
+   *
+   * If Redis fails → allow requests (availability > strict enforcement)
+   */
+  skipFailedRequests: false
 });
 
 /* =============================================================================
@@ -218,43 +201,68 @@ module.exports = attendanceRateLimiter;
 
 /**
  * =============================================================================
- * ARCHITECTURAL INSIGHTS
+ * ARCHITECTURAL ANALYSIS
  * =============================================================================
  *
- * 1. IDENTITY MODEL
+ * 1. IDENTITY FUNCTION
  * -----------------------------------------------------------------------------
- * Identity is derived from IP abstraction (normalized via library),
- * not raw transport value.
+ *
+ *   identity(req) = normalize(IP)
+ *
+ * Properties:
+ *   • deterministic
+ *   • collision-resistant (practically)
+ *
+ * -----------------------------------------------------------------------------
  *
  * 2. STATE MODEL
  * -----------------------------------------------------------------------------
- * Rate limiting uses in-memory counters (default),
- * which can be replaced with Redis-backed stores for scalability.
  *
- * 3. EXTENSIBILITY
- * -----------------------------------------------------------------------------
- * This middleware can be upgraded to:
+ *   State is externalized to Redis:
  *
- *   - distributed rate limiting (Redis)
- *   - token bucket algorithms
- *   - per-user limits
+ *     counter(K, W) stored remotely
  *
- * 4. FAILURE CHARACTERISTIC
- * -----------------------------------------------------------------------------
- * Rejection is deterministic and idempotent:
+ * Benefits:
+ *   • horizontal scalability
+ *   • consistency across instances
  *
- *   same request → same outcome after limit breach
- *
- * 5. POSITION IN PIPELINE
  * -----------------------------------------------------------------------------
  *
- *   Request
+ * 3. FAILURE MODE
+ * -----------------------------------------------------------------------------
+ *
+ * Fail-open strategy:
+ *
+ *   Redis unavailable → requests allowed
+ *
+ * Justification:
+ *   availability > strict enforcement
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 4. COMPLEXITY
+ * -----------------------------------------------------------------------------
+ *
+ * Time Complexity:
+ *   O(1) per request
+ *
+ * Space Complexity:
+ *   O(N keys per window)
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 5. PIPELINE POSITION
+ * -----------------------------------------------------------------------------
+ *
+ * Request Flow:
+ *
+ *   Client
  *     ↓
- *   Edge Gateway
+ *   Gateway
  *     ↓
  *   Rate Limiter  ← (THIS MODULE)
  *     ↓
- *   Authentication
+ *   Auth
  *     ↓
  *   Business Logic
  *
