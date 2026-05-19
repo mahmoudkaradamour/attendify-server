@@ -142,7 +142,7 @@
  * =============================================================================
  */
 
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptj");
 
 const config = require("../config/env");
 
