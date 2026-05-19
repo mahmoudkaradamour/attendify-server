@@ -11,14 +11,17 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "helmet": "^7.0.0",
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.2.0",
+    "redis": "^5.12.1",
     "swagger-ui-express": "^5.0.1",
-    "yamljs": "^0.3.0"
+    "yamljs": "^0.3.0",
+    "zod": "^4.4.3"
   },
   "keywords": [
     "nodejs",

@@ -1,269 +1,617 @@
 /**
- * ============================================================
- * 🔐 CRYPTOGRAPHIC UTILITIES MODULE (HARDENED CORE SECURITY)
- 🧠 SYSTEM POSITION: * ============================================================
+ * =============================================================================
+ * Attendify Enterprise Cryptographic Utility Module
+ * =============================================================================
  *
- *   Client (Flutter)
- *        ↓
- *   Payload generation
- *        ↓
- *   Canonicalization + Signing
- *        ↓
- *   Transport (network)
- *        ↓
- *   Backend → Verification (this module)
+ * FILE:
+ * src/utils/crypto.util.js
  *
- * ------------------------------------------------------------
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ * This module implements centralized cryptographic utility functions for the
+ * Attendify backend platform.
  *
- * 🔬 CRYPTOGRAPHIC MODEL:
+ * It provides low-level deterministic primitives used by security-sensitive
+ * subsystems such as:
  *
- *   Payload → Canonical Form → HMAC-SHA256 → Signature
+ *   ✅ HMAC request signing
+ *   ✅ HMAC request verification
+ *   ✅ Attendance payload integrity verification
+ *   ✅ Nonce generation support
+ *   ✅ Replay-protection identifiers
+ *   ✅ Deterministic canonicalization
+ *   ✅ Timing-safe comparisons
  *
- * ------------------------------------------------------------
+ * -----------------------------------------------------------------------------
+ * WHY CENTRALIZED CRYPTO UTILITIES MATTER
+ * -----------------------------------------------------------------------------
  *
- * ⚠️ SECURITY PRINCIPLES:
+ * Cryptographic logic must not be duplicated across controllers, services, or
+ * middleware.
  *
- *   ✅ Trust nothing from the client
- *   ✅ Use constant-time comparisons
- *   ✅ Ensure deterministic serialization
- *   ✅ Avoid weak randomness sources
- *   ✅ Fail safely on any anomaly
+ * Duplicated cryptographic logic creates:
  *
- * ------------------------------------------------------------
+ *   ❌ Inconsistent canonicalization
+ *   ❌ Signature mismatch bugs
+ *   ❌ Timing attack risks
+ *   ❌ Weak randomness mistakes
+ *   ❌ Maintenance complexity
+ *   ❌ Security drift
+ *
+ * Therefore:
+ *
+ *   All low-level cryptographic operations are centralized here.
+ *
+ * -----------------------------------------------------------------------------
+ * IMPORTANT CRYPTOGRAPHIC RULE
+ * -----------------------------------------------------------------------------
+ *
+ * This module provides primitives.
+ *
+ * It does NOT decide business policy.
+ *
+ * For example:
+ *
+ *   ✅ This module can verify an HMAC signature.
+ *   ❌ This module does not decide whether attendance should be accepted.
+ *
+ * That decision belongs to:
+ *
+ *   src/security/verifier.service.js
+ *
+ * -----------------------------------------------------------------------------
+ * CANONICALIZATION MODEL
+ * -----------------------------------------------------------------------------
+ *
+ * HMAC signatures require both client and server to sign exactly the same byte
+ * representation.
+ *
+ * JSON object key order is not guaranteed semantically.
+ *
+ * Therefore Attendify uses deterministic canonicalization:
+ *
+ *   ✅ Object keys sorted lexicographically
+ *   ✅ Array order preserved
+ *   ✅ Primitive values serialized using JSON.stringify
+ *   ✅ Nested structures canonicalized recursively
+ *
+ * -----------------------------------------------------------------------------
+ * CANONICALIZATION FLOW
+ * -----------------------------------------------------------------------------
+ *
+ *                       JavaScript Object
+ *                              │
+ *                              ▼
+ *                      canonicalize(value)
+ *                              │
+ *                              ▼
+ *                 Deterministic String Output
+ *                              │
+ *                              ▼
+ *                       HMAC-SHA256 Input
+ *
+ * -----------------------------------------------------------------------------
+ * HMAC VERIFICATION FLOW
+ * -----------------------------------------------------------------------------
+ *
+ *                    Incoming Payload + Signature
+ *                                │
+ *                                ▼
+ *                         Canonicalize Payload
+ *                                │
+ *                                ▼
+ *                       Recompute HMAC-SHA256
+ *                                │
+ *                                ▼
+ *                      Timing-Safe Comparison
+ *                                │
+ *                 ┌──────────────┴──────────────┐
+ *                 ▼                             ▼
+ *              Match                         Mismatch
+ *                 │                             │
+ *                 ▼                             ▼
+ *             Valid                         Invalid
+ *
+ * -----------------------------------------------------------------------------
+ * SECURITY DESIGN PRINCIPLE
+ * -----------------------------------------------------------------------------
+ *
+ *   "Cryptographic verification must be deterministic, centralized, and
+ *    timing-safe."
+ *
+ * =============================================================================
+ */
+
+/* =============================================================================
+ * MODULE IMPORTS
+ * =============================================================================
  */
 
 const crypto = require("crypto");
 
+/* =============================================================================
+ * GLOBAL CRYPTOGRAPHIC CONSTANTS
+ * =============================================================================
+ */
 
-/* ============================================================
-   🔑 HASH FUNCTION (SHA-256)
-   ============================================================ */
+const HMAC_ALGORITHM =
+  "sha256";
+
+const DEFAULT_RANDOM_BYTES =
+  32;
+
+/* =============================================================================
+ * INPUT VALIDATION HELPERS
+ * =============================================================================
+ */
 
 /**
- * Produces a SHA-256 hash
+ * assertSecret()
+ * -----------------------------------------------------------------------------
  *
- * @param {string|Buffer} data
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Validates cryptographic secret input.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {string} secret
+ */
+
+function assertSecret(secret) {
+
+  if (
+    typeof secret !== "string" ||
+    secret.length === 0
+  ) {
+
+    throw new Error(
+      "Cryptographic secret must be a non-empty string"
+    );
+  }
+}
+
+/**
+ * assertSignature()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Validates incoming signature input.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {string} signature
+ */
+
+function assertSignature(signature) {
+
+  if (
+    typeof signature !== "string" ||
+    signature.length === 0
+  ) {
+
+    throw new Error(
+      "Signature must be a non-empty string"
+    );
+  }
+}
+
+/* =============================================================================
+ * DETERMINISTIC JSON CANONICALIZATION
+ * =============================================================================
+ */
+
+/**
+ * canonicalize()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Converts any JSON-compatible value into a deterministic string representation.
+ *
+ * -----------------------------------------------------------------------------
+ * RULES:
+ * -----------------------------------------------------------------------------
+ *
+ *   ✅ null is serialized as "null"
+ *   ✅ primitive values use JSON.stringify
+ *   ✅ arrays preserve order
+ *   ✅ object keys are sorted lexicographically
+ *   ✅ nested values are canonicalized recursively
+ *
+ * -----------------------------------------------------------------------------
+ * @param {*} value
+ *
  * @returns {string}
  */
-function hash(data) {
+
+function canonicalize(value) {
+
+  if (
+    value === null ||
+    typeof value !== "object"
+  ) {
+
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+
+    return `[${value
+      .map(item => canonicalize(item))
+      .join(",")}]`;
+  }
+
+  const keys =
+    Object.keys(value).sort();
+
+  return `{${keys
+    .map(key => {
+
+      const canonicalKey =
+        JSON.stringify(key);
+
+      const canonicalValue =
+        canonicalize(value[key]);
+
+      return `${canonicalKey}:${canonicalValue}`;
+    })
+    .join(",")}}`;
+}
+
+/* =============================================================================
+ * HASHING UTILITIES
+ * =============================================================================
+ */
+
+/**
+ * sha256Hex()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Produces a SHA-256 hash in hexadecimal encoding.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {string|Buffer} input
+ *
+ * @returns {string}
+ */
+
+function sha256Hex(input) {
 
   return crypto
     .createHash("sha256")
-    .update(data)
+    .update(input)
     .digest("hex");
 }
 
-
-/* ============================================================
-   🧪 DEEP CANONICALIZATION (CRITICAL SECURITY COMPONENT)
-   ============================================================ */
+/* =============================================================================
+ * RANDOMNESS UTILITIES
+ * =============================================================================
+ */
 
 /**
- * 🔬 FUNCTION: canonicalize()
+ * randomHex()
+ * -----------------------------------------------------------------------------
  *
  * PURPOSE:
- *   Convert any JavaScript object into a deterministic string.
+ * -----------------------------------------------------------------------------
  *
- * WHY:
- *   JSON.stringify is NOT deterministic for objects.
+ * Generates cryptographically secure random hexadecimal strings.
  *
- * ------------------------------------------------------------
+ * Default:
  *
- * 📊 FLOW:
+ *   32 bytes = 64 hex characters
  *
- *   Input
- *     ↓
- *   Sort keys recursively
- *     ↓
- *   Normalize structure
- *     ↓
- *   Serialize to JSON string
+ * -----------------------------------------------------------------------------
+ * @param {number} bytes
  *
- * ------------------------------------------------------------
- *
- * SECURITY IMPACT:
- *
- *   Prevents signature mismatch between:
- *     Client vs Server
- *
- * ------------------------------------------------------------
- *
- * @param {any} input
  * @returns {string}
  */
-function canonicalize(input) {
 
-  /**
-   * Primitive values → directly stringify
-   */
-  if (input === null || typeof input !== "object") {
-    return JSON.stringify(input);
-  }
+function randomHex(bytes = DEFAULT_RANDOM_BYTES) {
 
-  /**
-   * Arrays → preserve order but canonicalize elements
-   */
-  if (Array.isArray(input)) {
-    return JSON.stringify(
-      input.map(item => JSON.parse(canonicalize(item)))
+  if (
+    !Number.isInteger(bytes) ||
+    bytes <= 0
+  ) {
+
+    throw new Error(
+      "Random byte length must be a positive integer"
     );
   }
 
-  /**
-   * Objects → sort keys recursively
-   */
-  const sortedKeys = Object.keys(input).sort();
-  const result = {};
-
-  for (const key of sortedKeys) {
-    result[key] = JSON.parse(canonicalize(input[key]));
-  }
-
-  return JSON.stringify(result);
+  return crypto
+    .randomBytes(bytes)
+    .toString("hex");
 }
 
-
-/* ============================================================
-   🔏 HMAC SIGNING
-   ============================================================ */
+/* =============================================================================
+ * HMAC SIGNING
+ * =============================================================================
+ */
 
 /**
- * 🔬 FUNCTION: sign()
+ * signHmacSha256()
+ * -----------------------------------------------------------------------------
  *
  * PURPOSE:
- *   Produce HMAC-SHA256 signature
+ * -----------------------------------------------------------------------------
  *
- * SECURITY:
- *   Ensures:
- *     ✅ Data authenticity
- *     ✅ Data integrity
+ * Signs a string using HMAC-SHA256.
  *
- * ------------------------------------------------------------
- *
- * @param {string|object} data
+ * -----------------------------------------------------------------------------
+ * @param {string} data
  * @param {string} secret
+ *
  * @returns {string}
  */
-function sign(data, secret) {
 
-  /**
-   * Ensure deterministic input
-   */
+function signHmacSha256(
+  data,
+  secret
+) {
+
+  assertSecret(secret);
+
   if (typeof data !== "string") {
-    data = canonicalize(data);
+
+    throw new Error(
+      "HMAC input data must be a string"
+    );
   }
 
   return crypto
-    .createHmac("sha256", secret)
+    .createHmac(
+      HMAC_ALGORITHM,
+      secret
+    )
     .update(data)
     .digest("hex");
 }
 
-
-/* ============================================================
-   ✅ SIGNATURE VERIFICATION
-   ============================================================ */
-
 /**
- * 🔬 FUNCTION: verifySignature()
+ * signPayload()
+ * -----------------------------------------------------------------------------
  *
  * PURPOSE:
- *   Validate HMAC signature securely
+ * -----------------------------------------------------------------------------
  *
- * ------------------------------------------------------------
+ * Canonicalizes and signs a JSON-compatible payload using HMAC-SHA256.
  *
- * SECURITY:
- *
- *   ✅ Constant-time comparison
- *   ✅ Length validation
- *   ✅ Safe failure handling
- *
- * ------------------------------------------------------------
- *
- * @param {string|object} data
- * @param {string} signature
+ * -----------------------------------------------------------------------------
+ * @param {*} payload
  * @param {string} secret
- * @returns {boolean}
- */
-function verifySignature(data, signature, secret) {
-
-  try {
-
-    /**
-     * Normalize data before verification
-     */
-    if (typeof data !== "string") {
-      data = canonicalize(data);
-    }
-
-    const expected = sign(data, secret);
-
-    const sigBuffer = Buffer.from(signature, "hex");
-    const expBuffer = Buffer.from(expected, "hex");
-
-    /**
-     * Prevent length-based oracle attacks
-     */
-    if (sigBuffer.length !== expBuffer.length) {
-      return false;
-    }
-
-    /**
-     * ✅ Timing-safe comparison
-     */
-    return crypto.timingSafeEqual(sigBuffer, expBuffer);
-
-  } catch (err) {
-
-    /**
-     * Fail securely
-     */
-    return false;
-  }
-}
-
-
-/* ============================================================
-   🎲 CRYPTOGRAPHIC RANDOM GENERATOR
-   ============================================================ */
-
-/**
- * 🔬 FUNCTION: randomHex()
  *
- * PURPOSE:
- *   Generate secure random string
- *
- * ------------------------------------------------------------
- *
- * INTERNAL:
- *   Uses OS-level entropy pool
- *
- * ------------------------------------------------------------
- *
- * @param {number} length (bytes)
  * @returns {string}
  */
-function randomHex(length = 32) {
 
-  return crypto
-    .randomBytes(length)
-    .toString("hex");
+function signPayload(
+  payload,
+  secret
+) {
+
+  const canonicalPayload =
+    canonicalize(payload);
+
+  return signHmacSha256(
+    canonicalPayload,
+    secret
+  );
 }
 
+/* =============================================================================
+ * TIMING-SAFE COMPARISON
+ * =============================================================================
+ */
 
-/* ============================================================
-   📤 EXPORTS
-   ============================================================ */
+/**
+ * timingSafeEqualHex()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Compares hexadecimal strings using timing-safe comparison.
+ *
+ * -----------------------------------------------------------------------------
+ * IMPORTANT:
+ * -----------------------------------------------------------------------------
+ *
+ * crypto.timingSafeEqual requires equal buffer lengths.
+ *
+ * This function safely returns false when lengths differ.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {string} left
+ * @param {string} right
+ *
+ * @returns {boolean}
+ */
+
+function timingSafeEqualHex(
+  left,
+  right
+) {
+
+  if (
+    typeof left !== "string" ||
+    typeof right !== "string"
+  ) {
+
+    return false;
+  }
+
+  const leftBuffer =
+    Buffer.from(left, "hex");
+
+  const rightBuffer =
+    Buffer.from(right, "hex");
+
+  if (
+    leftBuffer.length !== rightBuffer.length
+  ) {
+
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    leftBuffer,
+    rightBuffer
+  );
+}
+
+/* =============================================================================
+ * HMAC VERIFICATION
+ * =============================================================================
+ */
+
+/**
+ * verifyHmacSha256()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Verifies whether a provided HMAC signature matches a string input.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {string} data
+ * @param {string} providedSignature
+ * @param {string} secret
+ *
+ * @returns {boolean}
+ */
+
+function verifyHmacSha256(
+  data,
+  providedSignature,
+  secret
+) {
+
+  assertSignature(providedSignature);
+
+  const expectedSignature =
+    signHmacSha256(
+      data,
+      secret
+    );
+
+  return timingSafeEqualHex(
+    expectedSignature,
+    providedSignature
+  );
+}
+
+/**
+ * verifyPayloadSignature()
+ * -----------------------------------------------------------------------------
+ *
+ * PURPOSE:
+ * -----------------------------------------------------------------------------
+ *
+ * Canonicalizes a payload and verifies the provided HMAC-SHA256 signature.
+ *
+ * -----------------------------------------------------------------------------
+ * @param {*} payload
+ * @param {string} providedSignature
+ * @param {string} secret
+ *
+ * @returns {boolean}
+ */
+
+function verifyPayloadSignature(
+  payload,
+  providedSignature,
+  secret
+) {
+
+  assertSignature(providedSignature);
+
+  const canonicalPayload =
+    canonicalize(payload);
+
+  return verifyHmacSha256(
+    canonicalPayload,
+    providedSignature,
+    secret
+  );
+}
+
+/* =============================================================================
+ * EXPORTS
+ * =============================================================================
+ */
 
 module.exports = {
-  hash,
-  sign,
-  verifySignature,
+
+  /**
+   * Constants.
+   */
+  HMAC_ALGORITHM,
+  DEFAULT_RANDOM_BYTES,
+
+  /**
+   * Canonicalization.
+   */
+  canonicalize,
+
+  /**
+   * Hashing.
+   */
+  sha256Hex,
+
+  /**
+   * Secure randomness.
+   */
   randomHex,
-  canonicalize
+
+  /**
+   * HMAC signing.
+   */
+  signHmacSha256,
+  signPayload,
+
+  /**
+   * Timing-safe comparison.
+   */
+  timingSafeEqualHex,
+
+  /**
+   * HMAC verification.
+   */
+  verifyHmacSha256,
+  verifyPayloadSignature
 };
 
-/* ============================================================
-   🏁 END OF MODULE
-   ============================================================
+/**
+ * =============================================================================
+ * END OF FILE
+ * =============================================================================
+ *
+ * FINAL ENGINEERING SUMMARY
+ * -----------------------------------------------------------------------------
+ *
+ * This module establishes:
+ *
+ *   ✅ Deterministic JSON canonicalization
+ *   ✅ HMAC-SHA256 signing
+ *   ✅ HMAC-SHA256 verification
+ *   ✅ Timing-safe hexadecimal comparison
+ *   ✅ Cryptographically secure random generation
+ *   ✅ SHA-256 hashing utilities
+ *   ✅ Centralized cryptographic primitives
+ *
+ * -----------------------------------------------------------------------------
+ * CORE PRINCIPLE
+ * -----------------------------------------------------------------------------
+ *
+ *   "Cryptographic operations must be deterministic, centralized, and
+ *    timing-safe."
+ *
+ * =============================================================================
  */

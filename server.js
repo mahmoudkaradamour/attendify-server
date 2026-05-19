@@ -1,412 +1,299 @@
 /**
- * ============================================================
- * 🌐 ATTENDIFY BACKEND SERVER (COMPOSITION ROOT)
- * ============================================================
+ * =============================================================================
+ * Attendify — Server Bootstrap (Deterministic System Orchestrator)
+ * =============================================================================
  *
- * 🎯 PURPOSE:
+ * PURPOSE
  *
- * This module serves as the **composition root** of the backend system.
- * It initializes infrastructure components and orchestrates the entire runtime.
+ * This module is the **composition root and lifecycle coordinator**
+ * of the entire system.
  *
- * ------------------------------------------------------------
+ * It guarantees:
  *
- * 🧠 SYSTEM ARCHITECTURE OVERVIEW:
+ *   ✅ Valid configuration before execution
+ *   ✅ Deterministic infrastructure initialization
+ *   ✅ Safe application startup
+ *   ✅ Strict shutdown orchestration
  *
- *   Client (Flutter / API Consumer)
- *        ↓
- *   Cloudflare Worker (Edge Gateway)
- *        ↓
- *   Express Server (THIS MODULE)
- *        ↓
- *   Middleware Pipeline
- *        ↓
- *   Route Controllers (/auth, /company, /nonce, /attendance)
- *        ↓
- *   Security Layer (JWT + Cryptographic Verification)
- *        ↓
- *   MongoDB (Persistence)
+ * =============================================================================
  *
- * ------------------------------------------------------------
+ * 🧠 FORMAL MODEL (SYSTEM INITIALIZATION FUNCTION)
  *
- * 🔬 DESIGN PRINCIPLES:
+ * Let:
  *
- *   ✅ Composition Root Pattern
- *   ✅ Zero-Trust Security Model
- *   ✅ Stateless API Design
- *   ✅ Layered Architecture
- *   ✅ Defense-in-Depth Strategy
+ *   C = configuration
+ *   I = infrastructure (Redis, Mongo)
+ *   A = application (Express)
  *
- * ------------------------------------------------------------
+ * Then:
  *
- * 🔐 SECURITY MODEL (MULTI-LAYER DEFENSE):
+ *   System = validate(C) → init(I) → start(A) → manageLifecycle()
  *
- *   Layer 1 → Edge Gateway (Cloudflare Worker)
- *   Layer 2 → Shared Secret Validation (x-attendify-secret)
- *   Layer 3 → JWT Authentication (Identity Layer)
- *   Layer 4 → Cryptographic Verification (HMAC + Nonce)
- *   Layer 5 → Database Integrity Enforcement
+ * =============================================================================
  *
- * ------------------------------------------------------------
+ * 📊 STARTUP PIPELINE (STRICTLY ORDERED)
+ *
+ *       ENV LOAD
+ *          │
+ *          ▼
+ *   CONFIG VALIDATION (FAIL FAST)
+ *          │
+ *          ▼
+ *   INFRASTRUCTURE INIT
+ *          │
+ *          ▼
+ *     APP COMPOSITION
+ *          │
+ *          ▼
+ *     HTTP SERVER START
+ *          │
+ *          ▼
+ *     SHUTDOWN REGISTRATION
+ *          │
+ *          ▼
+ *        READY ✅
+ *
+ * =============================================================================
+ *
+ * 📊 SHUTDOWN FLOW (CRITICAL ORDER)
+ *
+ *   1. Stop HTTP intake (server.close)
+ *   2. Stop workers
+ *   3. Close Redis
+ *   4. Close Mongo
+ *
+ * =============================================================================
+ *
+ * 🔐 SYSTEM GUARANTEES
+ *
+ *   ✅ No invalid startup state
+ *   ✅ No partial execution
+ *   ✅ No resource leakage
+ *   ✅ Deterministic lifecycle transitions
+ *
+ * =============================================================================
  */
 
-
-// ============================================================
-// 📦 MODULE IMPORTS
-// ============================================================
-
-const express = require("express");
-const cors = require("cors");
-const helmet = require("helmet");
 require("dotenv").config();
 
-const { connectDB } = require("./db");
+const http = require("http");
 
-/**
- * Core business routes
- */
-const authRoutes = require("./routes/auth");
-const companyRoutes = require("./routes/company");
-
-/**
- * Security endpoints
- */
-const nonceRoutes = require("./src/api/nonce.controller");
-const attendanceRoutes = require("./src/api/attendance.controller");
-
-
-// ============================================================
-// 🧱 APPLICATION INITIALIZATION
-// ============================================================
-
-const app = express();
-
-
-// ============================================================
-// 🔐 GLOBAL MIDDLEWARE PIPELINE
-// ============================================================
-
-/**
- * 📊 REQUEST PROCESSING PIPELINE:
- *
- *   Incoming Request
- *        ↓
- *   Helmet (Security Headers)
- *        ↓
- *   Disable fingerprinting
- *        ↓
- *   CORS policy enforcement
- *        ↓
- *   JSON parsing
- *        ↓
- *   Zero-Trust Validation
- *        ↓
- *   Route Handling
- *        ↓
- *   Response
+/* =============================================================================
+ * CONFIG VALIDATION (CRITICAL — MUST EXECUTE FIRST)
+ * =============================================================================
  */
 
-/**
- * ✅ Security headers
- */
-app.use(helmet());
+const {
+  validateConfig
+} = require("./src/config/config.validator");
 
 /**
- * ✅ Hide Express signature (security best practice)
+ * 🚨 HARD GUARANTEE:
+ * System MUST NOT start with invalid configuration
  */
-app.disable("x-powered-by");
+validateConfig();
+
+/* =============================================================================
+ * APPLICATION
+ * =============================================================================
+ */
+
+const createApp =
+  require("./src/app/create-app");
+
+/* =============================================================================
+ * INFRASTRUCTURE
+ * =============================================================================
+ */
+
+const redis =
+  require("./src/infrastructure/redis/redis.client");
+
+const mongo =
+  require("./src/infrastructure/mongo/mongo.connection");
+
+/* =============================================================================
+ * WORKER
+ * =============================================================================
+ */
+
+const evidenceWorker =
+  require("./src/workers/evidence.worker");
+
+/* =============================================================================
+ * LIFECYCLE MANAGEMENT
+ * =============================================================================
+ */
+
+const {
+  registerResource,
+  registerShutdownHandlers
+} = require("./src/infrastructure/graceful-shutdown");
+
+/* =============================================================================
+ * OBSERVABILITY
+ * =============================================================================
+ */
+
+const logger =
+  require("./src/infrastructure/logging/logger");
+
+/* =============================================================================
+ * CONFIGURATION
+ * =============================================================================
+ */
+
+const PORT = process.env.PORT || 3000;
 
 /**
- * ✅ Cross-Origin Resource Sharing
+ * Indicates if system is shutting down (readiness control)
  */
-app.use(cors());
+let isShuttingDown = false;
 
-/**
- * ✅ JSON body parser
- */
-app.use(express.json());
-
-
-// ============================================================
-// 🔐 ZERO-TRUST GATEWAY VALIDATION
-// ============================================================
-
-/**
- * 🎯 PURPOSE:
- *
- * Enforce that ONLY trusted Edge Gateway can access backend.
- *
- * ------------------------------------------------------------
- *
- * 🔬 THEORY:
- *
- * Implements shared-secret authentication:
- *
- *   Worker ↔ Backend
- *
- * ------------------------------------------------------------
- *
- * 📊 FLOW:
- *
- *   Request arrives
- *        ↓
- *   Is it health endpoint?
- *        ↓
- *   Is environment production?
- *        ↓
- *   Validate x-attendify-secret
- *        ↓
- *   Allow or reject
+/* =============================================================================
+ * BOOTSTRAP FUNCTION
+ * =============================================================================
  */
 
-app.use((req, res, next) => {
-
-  /**
-   * ✅ Health endpoint bypass
-   */
-  if (req.path === "/") {
-    return next();
-  }
-
-  /**
-   * ✅ Development mode bypass
-   */
-  if (process.env.NODE_ENV !== "production") {
-    return next();
-  }
-
-  /**
-   * ✅ Extract secret header
-   */
-  const secret = req.headers["x-attendify-secret"];
-
-  /**
-   * ✅ Validate secret
-   */
-  if (secret !== process.env.EDGE_SECRET) {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied (invalid gateway)"
-    });
-  }
-
-  next();
-});
-
-
-// ============================================================
-// 🌐 HEALTH CHECK ENDPOINT
-// ============================================================
-
-/**
- * ✅ GET /
- *
- * PURPOSE:
- *   - System liveness probe
- *   - Load balancer health check
- */
-
-app.get("/", (req, res) => {
-
-  res.json({
-    status: "OK",
-    system: "Attendify Backend",
-    uptime: process.uptime()
-  });
-
-});
-
-
-// ============================================================
-// 🌐 ROUTE REGISTRATION
-// ============================================================
-
-/**
- * 📊 ROUTE MAPPING:
- *
- *   /auth       → Authentication (JWT)
- *   /company    → Tenant management
- *   /nonce      → Nonce issuance
- *   /attendance → Cryptographic verification endpoint
- */
-
-app.use("/auth", authRoutes);
-app.use("/company", companyRoutes);
-app.use("/nonce", nonceRoutes);
-app.use("/attendance", attendanceRoutes);
-
-
-// ============================================================
-// 🛑 GLOBAL ERROR HANDLER
-// ============================================================
-
-/**
- * 🎯 PURPOSE:
- *
- * Centralized error handling layer
- *
- * ------------------------------------------------------------
- *
- * SECURITY:
- *
- *   ✅ Prevents stack trace leakage
- *   ✅ Standardized responses
- *   ✅ Protects internal system details
- */
-
-app.use((err, req, res, next) => {
-
-  console.error("🔥 UNHANDLED ERROR:", err);
-
-  res.status(500).json({
-    success: false,
-    message: "Internal server error"
-  });
-
-});
-
-
-// ============================================================
-// 🚀 SERVER STARTUP SEQUENCE
-// ============================================================
-
-/**
- * 📊 INITIALIZATION FLOW:
- *
- *   Process boot
- *        ↓
- *   Connect to database
- *        ↓
- *   Inject DB into app context
- *        ↓
- *   Start HTTP server
- *
- * ------------------------------------------------------------
- *
- * WHY:
- *
- * Avoid serving requests before DB readiness
- */
-
-async function startServer() {
+async function bootstrap() {
 
   try {
 
-    console.log("🔄 Initializing Attendify backend...");
+    logger.info("Bootstrap phase: START");
 
     /**
-     * ✅ Step 1: Connect MongoDB
+     * -------------------------------------------------------------------------
+     * STEP 1 — CONNECT INFRASTRUCTURE
+     * -------------------------------------------------------------------------
      */
-    const db = await connectDB();
+
+    logger.info("Connecting infrastructure");
+
+    await redis.connect();
+    await mongo.connect();
+
+    logger.info("Infrastructure: READY");
 
     /**
-     * ✅ Step 2: Inject DB globally
+     * -------------------------------------------------------------------------
+     * STEP 2 — CREATE APPLICATION
+     * -------------------------------------------------------------------------
      */
-    app.locals.db = db;
 
-    console.log("✅ Database connected");
+    const app = createApp();
 
     /**
-     * ✅ Step 3: Define port
+     * Readiness guard during shutdown
      */
-    const PORT = process.env.PORT || 3000;
+    app.use((req, res, next) => {
+      if (isShuttingDown) {
+        return res.status(503).json({
+          error: "Service Unavailable",
+          message: "Server is shutting down"
+        });
+      }
+      next();
+    });
+
+    const server = http.createServer(app);
 
     /**
-     * ✅ Bind to all interfaces (cloud requirement)
+     * -------------------------------------------------------------------------
+     * STEP 3 — START SERVER (SAFE)
+     * -------------------------------------------------------------------------
      */
-    app.listen(PORT, "0.0.0.0", () => {
 
-      console.log("✅ Server operational");
-      console.log(`🌍 Listening on port ${PORT}`);
+    await new Promise((resolve, reject) => {
+
+      server.once("error", reject);
+
+      server.listen(PORT, resolve);
 
     });
 
-  } catch (err) {
-
-    console.error("❌ Startup failed:", err);
+    logger.info("HTTP server started", {
+      port: PORT
+    });
 
     /**
-     * Fail fast (critical failure)
+     * -------------------------------------------------------------------------
+     * STEP 4 — REGISTER SHUTDOWN SEQUENCE
+     * -------------------------------------------------------------------------
      */
+
+    /**
+     * 1️⃣ STOP HTTP INTAKE
+     */
+    registerResource("http-server", async () => {
+
+      isShuttingDown = true;
+
+      logger.warn("Closing HTTP server");
+
+      await new Promise((resolve, reject) => {
+        server.close(err => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+
+      logger.warn("HTTP server closed");
+    });
+
+    /**
+     * 2️⃣ STOP WORKERS
+     */
+    registerResource("worker", evidenceWorker.close);
+
+    /**
+     * 3️⃣ CLOSE REDIS
+     */
+    registerResource("redis", redis.close);
+
+    /**
+     * 4️⃣ CLOSE MONGO
+     */
+    registerResource("mongo", mongo.close);
+
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 5 — ATTACH SIGNAL HANDLERS
+     * -------------------------------------------------------------------------
+     */
+
+    registerShutdownHandlers();
+
+    /**
+     * -------------------------------------------------------------------------
+     * SYSTEM READY
+     * -------------------------------------------------------------------------
+     */
+
+    logger.info("System READY ✅");
+
+  } catch (err) {
+
+    /**
+     * -------------------------------------------------------------------------
+     * FAIL-FAST TERMINATION
+     * -------------------------------------------------------------------------
+     */
+
+    logger.error("Bootstrap failed", err);
+
     process.exit(1);
   }
 }
 
-
-/**
- * 🟢 ENTRY POINT
- */
-startServer();
-
-
-// ============================================================
-// 📊 FULL SYSTEM FLOW (ACADEMIC MODEL)
-// ============================================================
-
-/**
- * 🔁 END-TO-END PIPELINE:
- *
- *   Client Request
- *        ↓
- *   Cloudflare Worker
- *        ↓ (inject secret)
- *   Backend Server
- *        ↓
- *   Zero-Trust Middleware
- *        ↓
- *   Route Handler
- *
- *   === AUTH ===
- *   JWT issuance / validation
- *
- *   === NONCE ===
- *   Generate time-bound nonce
- *
- *   === ATTENDANCE ===
- *     → Canonicalize payload
- *     → Verify signature
- *     → Check nonce validity
- *     → Detect replay attacks
- *
- *        ↓
- *   Decision (ACCEPT / REJECT)
- *        ↓
- *   JSON Response
+/* =============================================================================
+ * ENTRY POINT
+ * =============================================================================
  */
 
-
-// ============================================================
-// 🔐 SECURITY GUARANTEES
-// ============================================================
+bootstrap();
 
 /**
- * ✅ Strict access control (Edge-only access)
- * ✅ Replay attack prevention
- * ✅ Payload integrity enforcement
- * ✅ Cryptographic verification
- * ✅ Identity assurance (JWT)
+ * =============================================================================
+ * END OF FILE
+ * =============================================================================
  */
-
-
-// ============================================================
-// ⚡ SCALABILITY MODEL
-// ============================================================
-
-/**
- * ✅ Stateless backend
- * ✅ Horizontal scalability
- * ✅ Load-balancer friendly
- * ✅ Edge-distributed architecture
- *
- * ------------------------------------------------------------
- *
- * FUTURE EXTENSIONS:
- *
- *   → Redis (distributed nonce store)
- *   → Rate limiting
- *   → Observability (metrics/logging)
- */
-
-
-// ============================================================
-// 🏁 END OF FILE
-// ============================================================
