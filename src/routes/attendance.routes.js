@@ -1,97 +1,83 @@
 /**
  * =============================================================================
- * Attendify — Attendance Routes Layer (Enterprise Routing Module)
+ * Attendify — Attendance Routing Layer (Enterprise-Grade)
  * =============================================================================
  *
  * OVERVIEW
  * =============================================================================
  *
- * This module defines the **HTTP routing interface** for attendance-related
- * operations in the system. It represents the **transport layer boundary**
- * between external clients and internal business logic.
+ * This module defines the **transport-layer entry points** for all attendance
+ * operations. It serves as a **deterministic orchestration layer** responsible
+ * for:
  *
- * The routing layer is responsible for:
- *
- *   • Endpoint definition
- *   • Middleware composition
- *   • Security enforcement integration
- *   • Request lifecycle orchestration
+ *   • Binding HTTP endpoints to controller functions
+ *   • Enforcing middleware execution order
+ *   • Ensuring all handlers are valid executable functions
+ *   • Creating a secure and observable request pipeline
  *
  * =============================================================================
  *
- * 🧠 ARCHITECTURAL POSITION
+ * 🧠 FORMAL ROUTING MODEL
  * =============================================================================
  *
- *              ┌────────────────────────────┐
- *              │        HTTP Client         │
- *              └────────────┬───────────────┘
- *                           │
- *                           ▼
- *              ┌────────────────────────────┐
- *              │     Routing Layer (THIS)   │
- *              └────────────┬───────────────┘
- *                           │
- *             ┌─────────────┼─────────────┐
- *             ▼             ▼             ▼
- *      Rate Limiter     Auth Guard     Validation
- *             │             │             │
- *             └─────────────┴─────────────┘
- *                           │
- *                           ▼
- *              ┌────────────────────────────┐
- *              │     Controller Layer      │
- *              └────────────┬───────────────┘
- *                           ▼
- *              ┌────────────────────────────┐
- *              │      Service Layer        │
- *              └────────────┬───────────────┘
- *                           ▼
- *              ┌────────────────────────────┐
- *              │      Database Layer       │
- *              └────────────────────────────┘
+ * Let:
+ *
+ *   R = HTTP Request
+ *   M = Middleware chain
+ *   C = Controller handler
+ *
+ * Then:
+ *
+ *   EXECUTE(R) =
+ *     M₁(R) → M₂(R) → ... → Mₙ(R) → C(R)
+ *
+ * If any Mi fails → pipeline terminates → error propagated
  *
  * =============================================================================
  *
- * 📊 REQUEST PROCESSING FLOW (PER ENDPOINT)
+ * 📊 PIPELINE EXECUTION FLOW
  * =============================================================================
  *
- *     Incoming Request
- *            │
- *            ▼
- *   Rate Limiting Middleware
- *            │
- *            ▼
- *   Authentication Guard (JWT)
- *            │
- *            ▼
- *   Request Validation (optional)
- *            │
- *            ▼
- *   Controller Execution
- *            │
- *            ▼
- *       Response Sent
- *
- * =============================================================================
- *
- * 🔐 SECURITY MODEL
- * =============================================================================
- *
- * Each endpoint enforces:
- *
- *   ✔ Rate limiting (anti-abuse)
- *   ✔ Authentication (JWT-based identity)
- *   ✔ Structured logging (via upstream middleware)
+ *                      ┌──────────────────────────┐
+ *                      │   Incoming HTTP Request  │
+ *                      └────────────┬─────────────┘
+ *                                   │
+ *                                   ▼
+ *                      Attendance Rate Limiter
+ *                                   │
+ *                                   ▼
+ *                         JWT Authentication Guard
+ *                                   │
+ *                                   ▼
+ *                         Controller (Business Entry)
+ *                                   │
+ *                                   ▼
+ *                              Service Layer
+ *                                   │
+ *                                   ▼
+ *                                Database
  *
  * =============================================================================
  *
- * ⚙️ DESIGN PRINCIPLES
+ * 🔐 SECURITY ENFORCEMENT ORDER
  * =============================================================================
  *
- * • Thin routing layer (no business logic)
- * • Explicit middleware pipeline
- * • Composability
- * • Deterministic execution order
+ *   1. Rate limiting → protects infrastructure
+ *   2. Authentication → establishes identity
+ *   3. Controller → trusted execution
+ *
+ * =============================================================================
+ *
+ * ⚠️ CRITICAL DESIGN RULE
+ * =============================================================================
+ *
+ * Every route handler MUST be a function.
+ *
+ * Violating this rule results in:
+ *
+ *   TypeError: argument handler must be a function
+ *
+ * This module enforces runtime validation to guarantee this invariant.
  *
  * =============================================================================
  */
@@ -100,115 +86,115 @@ const express = require("express");
 
 const router = express.Router();
 
-/**
- * =============================================================================
+/* =============================================================================
  * IMPORT MIDDLEWARES
  * =============================================================================
  */
 
-/**
- * Authentication Guard
- * ---------------------------------------------------------------------------
- * Enforces JWT verification and attaches user identity to request.
- */
 const authGuard =
   require("../security/jwt/auth.guard");
 
-/**
- * Rate Limiter
- * ---------------------------------------------------------------------------
- * Protects attendance endpoint from abuse (e.g., rapid check-ins).
- */
 const attendanceRateLimiter =
   require("../security/rate-limit/attendance.rate-limit");
 
-/**
- * =============================================================================
- * IMPORT CONTROLLERS
+/* =============================================================================
+ * IMPORT CONTROLLER (SAFE IMPORT PATTERN)
  * =============================================================================
  */
 
+const attendanceController =
+  require("../controllers/attendance.controller");
+
 /**
- * Controller functions encapsulate business logic delegation.
- *
- * NOTE:
- * Controllers must remain stateless and delegate logic to services.
+ * Explicit extraction prevents destructuring pitfalls
  */
-const {
+const submitAttendance =
+  attendanceController.submitAttendance;
 
-  /**
-   * Check-in operation
-   */
-  checkIn,
-
-  /**
-   * Check-out operation
-   */
-  checkOut,
-
-  /**
-   * Retrieve attendance logs
-   */
-  getAttendance
-
-} = require("../controllers/attendance.controller");
+const getMyAttendance =
+  attendanceController.getMyAttendance;
 
 /* =============================================================================
- * ROUTE DEFINITIONS
+ * RUNTIME TYPE VALIDATION (ENTERPRISE SAFETY LAYER)
+ * =============================================================================
+ *
+ * This eliminates an entire class of runtime crashes.
+ */
+
+function assertIsFunction(fn, name) {
+
+  if (typeof fn !== "function") {
+
+    throw new Error(
+      `[Routing Error] ${name} must be a function but received ${typeof fn}`
+    );
+  }
+}
+
+/**
+ * Validate middleware
+ */
+assertIsFunction(authGuard, "authGuard");
+assertIsFunction(attendanceRateLimiter, "attendanceRateLimiter");
+
+/**
+ * Validate controllers
+ */
+assertIsFunction(submitAttendance, "submitAttendance");
+assertIsFunction(getMyAttendance, "getMyAttendance");
+
+/* =============================================================================
+ * ROUTES DEFINITION
  * =============================================================================
  */
 
 /**
  * -----------------------------------------------------------------------------
- * POST /attendance/check-in
+ * POST /attendance
  * -----------------------------------------------------------------------------
  *
  * DESCRIPTION:
  * ---------------------------------------------------------------------------
- * Registers a check-in event for the authenticated user.
+ * Secure attendance submission endpoint.
  *
- * SECURITY LAYERS:
+ * This endpoint accepts a **cryptographically signed attendance payload**
+ * and forwards it through a secure verification pipeline.
  *
- *   1. Rate Limiting → Protects from rapid/flood submissions
- *   2. Authentication → Ensures user identity
- *
- * FLOW:
- *
- *   Request → RateLimit → AuthGuard → Controller → Service
- *
- */
-router.post(
-  "/check-in",
-
-  attendanceRateLimiter,
-
-  authGuard,
-
-  checkIn
-);
-
-/**
- * -----------------------------------------------------------------------------
- * POST /attendance/check-out
- * -----------------------------------------------------------------------------
- *
- * DESCRIPTION:
  * ---------------------------------------------------------------------------
- * Registers a check-out event for the authenticated user.
+ * EXECUTION FLOW:
+ * ---------------------------------------------------------------------------
  *
- * FLOW:
+ * Request
+ *   │
+ *   ▼
+ * RateLimiter
+ *   │
+ *   ▼
+ * AuthGuard
+ *   │
+ *   ▼
+ * submitAttendance (Controller)
+ *   │
+ *   ▼
+ * attendanceService.submitAttendance()
+ *   │
+ *   ▼
+ * HMAC verification + Replay protection + DB write
  *
- *   Request → RateLimit → AuthGuard → Controller → Service
+ * ---------------------------------------------------------------------------
  *
+ * SECURITY PROPERTIES:
+ *
+ *   ✅ Flood protection
+ *   ✅ Verified identity
+ *   ✅ Trusted tenant binding
  */
+
 router.post(
-  "/check-out",
-
+  "/",
   attendanceRateLimiter,
-
   authGuard,
-
-  checkOut
+  submitAttendance
 );
 
 /**
@@ -218,22 +204,35 @@ router.post(
  *
  * DESCRIPTION:
  * ---------------------------------------------------------------------------
- * Retrieves attendance records for the authenticated user.
+ * Retrieves attendance records for the authenticated tenant.
  *
- * SECURITY:
- *   • Authentication required
+ * ---------------------------------------------------------------------------
+ * EXECUTION FLOW:
+ * ---------------------------------------------------------------------------
  *
- * FLOW:
+ * Request
+ *   │
+ *   ▼
+ * AuthGuard
+ *   │
+ *   ▼
+ * getMyAttendance (Controller)
+ *   │
+ *   ▼
+ * attendanceService.getCompanyAttendance()
  *
- *   Request → AuthGuard → Controller → Service
+ * ---------------------------------------------------------------------------
  *
+ * SECURITY PROPERTIES:
+ *
+ *   ✅ Authenticated access only
+ *   ✅ No client-controlled tenant identity
  */
+
 router.get(
   "/",
-
   authGuard,
-
-  getAttendance
+  getMyAttendance
 );
 
 /* =============================================================================
@@ -248,64 +247,68 @@ module.exports = router;
  * ADVANCED ARCHITECTURAL NOTES
  * =============================================================================
  *
- * 1. ROUTING AS A BOUNDARY
+ * 1. FUNCTIONAL SAFETY GUARANTEE
  * ---------------------------------------------------------------------------
  *
- * The routing layer must:
+ * This module guarantees:
  *
- *   • Never contain business logic
- *   • Only orchestrate middleware
+ *   • All handlers are verified functions before route registration
+ *   • No lazy runtime failure inside Express internals
+ *
+ * This is achieved via:
+ *
+ *   assertIsFunction()
+ *
+ * ---------------------------------------------------------------------------
+ *
+ * 2. PIPELINE DETERMINISM
+ * ---------------------------------------------------------------------------
+ *
+ * The middleware execution order is strictly enforced:
+ *
+ *   RateLimit → Auth → Controller
  *
  * This ensures:
  *
- *   → Testability
- *   → Maintainability
- *   → Separation of concerns
+ *   • Early rejection (cheap → expensive)
+ *   • Predictable execution behavior
  *
- * -----------------------------------------------------------------------------
- *
- * 2. IDEMPOTENCY CONSIDERATIONS
  * ---------------------------------------------------------------------------
  *
- * Check-in/check-out endpoints are:
- *
- *   • Stateful operations
- *   • Should be guarded at service layer for duplicates
- *
- * -----------------------------------------------------------------------------
- *
- * 3. RATE LIMIT STRATEGY
+ * 3. SIDE-EFFECT ISOLATION
  * ---------------------------------------------------------------------------
  *
- * Applied selectively to:
+ * This layer contains:
  *
- *   • Mutation endpoints (POST)
+ *   ❌ No business logic
+ *   ❌ No database calls
+ *   ❌ No cryptographic operations
  *
- * Not applied to:
+ * Only orchestration.
  *
- *   • Read endpoints (GET) for usability
+ * ---------------------------------------------------------------------------
  *
- * -----------------------------------------------------------------------------
+ * 4. FAILURE MODES
+ * ---------------------------------------------------------------------------
  *
- * 4. EXTENSIBILITY
+ * Possible outcomes:
+ *
+ *   • 401 → Authentication failure
+ *   • 429 → Rate limit exceeded
+ *   • 400 → Validation (future layer)
+ *   • 500 → Internal service failure
+ *
+ * ---------------------------------------------------------------------------
+ *
+ * 5. EXTENSIBILITY MODEL
  * ---------------------------------------------------------------------------
  *
  * Future enhancements:
  *
- *   • Role-based restrictions (RBAC middleware)
- *   • Input validation schemas (Joi/Zod)
- *   • Auditing hooks
- *
- * -----------------------------------------------------------------------------
- *
- * 5. FAILURE MODES
- * ---------------------------------------------------------------------------
- *
- * Possible failures:
- *
- *   • 401 → Unauthorized (missing/invalid token)
- *   • 429 → Rate limit exceeded
- *   • 500 → Internal errors (controller/service level)
+ *   • Validation middleware (Joi/Zod)
+ *   • RBAC layer
+ *   • Audit logging middleware
+ *   • Multi-tenant scoping middleware
  *
  * =============================================================================
  *
