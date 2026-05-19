@@ -1,95 +1,85 @@
 /**
  * =============================================================================
- * Attendify Edge Gateway Verification Middleware
+ * Attendify — Edge Gateway Verification Middleware (Zero-Trust Entry Filter)
  * =============================================================================
  *
- * FILE:
- * src/middleware/edge-gateway.js
+ * PURPOSE
  *
- * PURPOSE:
- * -----------------------------------------------------------------------------
- * This middleware verifies that incoming backend requests originate from the
- * trusted edge gateway layer.
- *
- * Attendify production traffic is designed to flow through:
- *
- *   Client
- *     ↓
- *   Cloudflare Worker
- *     ↓
- *   Attendify Backend
- *
- * The Cloudflare Worker injects an internal secret header:
- *
- *   x-attendify-secret
- *
- * The backend verifies this header before processing protected traffic.
- *
- * -----------------------------------------------------------------------------
- * WHY EDGE GATEWAY VERIFICATION EXISTS
- * -----------------------------------------------------------------------------
- *
- * Without origin protection, attackers could attempt to bypass the Worker and
- * call the backend origin directly.
- *
- * This middleware helps mitigate:
- *
- *   ✅ Direct backend access
- *   ✅ Gateway bypass attempts
- *   ✅ Unauthorized origin traffic
- *   ✅ Public Railway/backend URL abuse
- *
- * -----------------------------------------------------------------------------
- * SECURITY FLOW
- * -----------------------------------------------------------------------------
- *
- *                    Incoming Request
- *                           │
- *                           ▼
- *                    Is Public Route?
- *                           │
- *             ┌─────────────┴─────────────┐
- *             ▼                           ▼
- *           Yes                           No
- *             │                           │
- *             ▼                           ▼
- *         Allow                  Validate x-attendify-secret
- *                                         │
- *                          ┌──────────────┴──────────────┐
- *                          ▼                             ▼
- *                       Valid                         Invalid
- *                          │                             │
- *                          ▼                             ▼
- *                        next()                    Reject 403
- *
- * -----------------------------------------------------------------------------
- * DEVELOPMENT POLICY
- * -----------------------------------------------------------------------------
- *
- * In non-production environments, gateway verification is bypassed to simplify
- * local development unless explicitly enforced later.
- *
- * In production:
- *
- *   EDGE_SECRET verification is mandatory.
- *
- * -----------------------------------------------------------------------------
- * SECURITY DESIGN PRINCIPLE
- * -----------------------------------------------------------------------------
- *
- *   "The backend origin should not trust traffic that bypasses the edge gateway."
+ * Enforces that all incoming traffic originates from a trusted edge gateway
+ * (e.g., Cloudflare Worker), establishing a **controlled ingress boundary**.
  *
  * =============================================================================
- */
-
-/* =============================================================================
- * MODULE IMPORTS
+ *
+ * 🧠 FORMAL MODEL (TRUST BOUNDARY VALIDATION)
+ *
+ * Let:
+ *
+ *   R = incoming request
+ *   G = trusted gateway
+ *
+ * Then:
+ *
+ *   accept(R) ⇔ R originates from G
+ *
+ * Otherwise:
+ *
+ *   reject(R)
+ *
+ * =============================================================================
+ *
+ * 📊 EXECUTION FLOW
+ *
+ *           Incoming HTTP Request
+ *                    │
+ *                    ▼
+ *           Is Public Route?
+ *            /              \
+ *         Yes                No
+ *         │                  │
+ *         ▼                  ▼
+ *      Allow       Validate x-attendify-secret
+ *                              │
+ *                     ┌────────┴────────┐
+ *                     ▼                 ▼
+ *                  Valid             Invalid
+ *                     │                 │
+ *                     ▼                 ▼
+ *                   next()          Reject 403
+ *
+ * =============================================================================
+ *
+ * 🔐 SECURITY PRINCIPLES
+ *
+ *   ✅ Zero trust on direct origin access
+ *   ✅ Constant-time secret comparison
+ *   ✅ Explicit public route allowlist
+ *   ✅ Full audit + logging visibility
+ *
  * =============================================================================
  */
 
 const crypto = require("crypto");
 
-const config = require("../config/env");
+/* =============================================================================
+ * CONFIGURATION
+ * =============================================================================
+ */
+
+const {
+  validateConfig
+} = require("../config/config.validator");
+
+/**
+ * ⚠️ NOTE:
+ * config should already be validated at bootstrap,
+ * we assume process.env normalized.
+ */
+const config = validateConfig();
+
+/* =============================================================================
+ * ERROR + OBSERVABILITY
+ * =============================================================================
+ */
 
 const {
   forbiddenError
@@ -107,114 +97,64 @@ const {
   auditLogger
 } = require("../observability/audit.logger");
 
-const logger = require("../observability/logger");
+const logger =
+  require("../infrastructure/logging/logger");
 
 /* =============================================================================
  * CONSTANTS
  * =============================================================================
  */
 
-const EDGE_SECRET_HEADER =
-  "x-attendify-secret";
+const EDGE_SECRET_HEADER = "x-attendify-secret";
 
 /**
- * Public routes that must remain accessible without edge-secret enforcement.
- *
- * The health endpoint is intentionally public for monitoring and platform
- * health checks.
+ * Public endpoints (must stay unprotected)
  */
-
-const DEFAULT_PUBLIC_PATHS =
-  Object.freeze([
-    "/"
-  ]);
+const DEFAULT_PUBLIC_PATHS = Object.freeze([
+  "/",
+  "/health",
+  "/ready",
+  "/auth/login",
+  "/auth/register"
+]);
 
 /* =============================================================================
- * TIMING SAFE COMPARISON
+ * TIMING-SAFE COMPARISON
  * =============================================================================
  */
 
-/**
- * timingSafeEqualStrings()
- * -----------------------------------------------------------------------------
- *
- * PURPOSE:
- * -----------------------------------------------------------------------------
- *
- * Compares two secret values using timing-safe comparison when possible.
- *
- * @param {string} a
- * @param {string} b
- *
- * @returns {boolean}
- */
+function timingSafeEqualStrings(a, b) {
 
-function timingSafeEqualStrings(
-  a,
-  b
-) {
-
-  if (
-    typeof a !== "string" ||
-    typeof b !== "string"
-  ) {
-
+  if (typeof a !== "string" || typeof b !== "string") {
     return false;
   }
 
-  const aBuffer =
-    Buffer.from(a);
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
 
-  const bBuffer =
-    Buffer.from(b);
-
-  if (
-    aBuffer.length !== bBuffer.length
-  ) {
-
+  if (aBuf.length !== bBuf.length) {
     return false;
   }
 
-  return crypto.timingSafeEqual(
-    aBuffer,
-    bBuffer
-  );
+  try {
+    return crypto.timingSafeEqual(aBuf, bBuf);
+  } catch {
+    return false;
+  }
 }
 
 /* =============================================================================
- * PUBLIC PATH CHECK
+ * PUBLIC ROUTE CHECK
  * =============================================================================
  */
 
-function isPublicPath(
-  req,
-  publicPaths
-) {
-
-  return publicPaths.includes(
-    req.path
-  );
+function isPublicPath(req, publicPaths) {
+  return publicPaths.includes(req.path);
 }
 
 /* =============================================================================
- * MIDDLEWARE FACTORY
+ * MAIN MIDDLEWARE FACTORY
  * =============================================================================
- */
-
-/**
- * edgeGatewayMiddleware()
- * -----------------------------------------------------------------------------
- *
- * PURPOSE:
- * -----------------------------------------------------------------------------
- *
- * Creates Express middleware that enforces trusted edge gateway verification.
- *
- * @param {object} options
- * @param {string[]} [options.publicPaths]
- * @param {boolean} [options.enforceInDevelopment]
- *
- * @returns {import("express").RequestHandler}
  */
 
 function edgeGatewayMiddleware({
@@ -222,36 +162,40 @@ function edgeGatewayMiddleware({
   publicPaths = DEFAULT_PUBLIC_PATHS,
 
   enforceInDevelopment = false
+
 } = {}) {
 
-  return function verifyEdgeGateway(
-    req,
-    res,
-    next
-  ) {
+  return function verifyEdgeGateway(req, res, next) {
 
-    if (
-      isPublicPath(req, publicPaths)
-    ) {
-
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 1 — PUBLIC ROUTES BYPASS
+     * -------------------------------------------------------------------------
+     */
+    if (isPublicPath(req, publicPaths)) {
       return next();
     }
 
-    if (
-      !config.IS_PRODUCTION &&
-      !enforceInDevelopment
-    ) {
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 2 — DEVELOPMENT BYPASS
+     * -------------------------------------------------------------------------
+     */
+    if (!config.IS_PRODUCTION && !enforceInDevelopment) {
 
       setSecurityContext({
-        edgeVerified:
-          false,
-
-        edgeBypassed:
-          true
+        edgeVerified: false,
+        edgeBypassed: true
       });
 
       return next();
     }
+
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 3 — SECRET VALIDATION
+     * -------------------------------------------------------------------------
+     */
 
     const providedSecret =
       req.headers[EDGE_SECRET_HEADER];
@@ -262,44 +206,28 @@ function edgeGatewayMiddleware({
         config.EDGE_SECRET
       );
 
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 4 — REJECTION
+     * -------------------------------------------------------------------------
+     */
     if (!valid) {
 
-      logger.warn(
-        "Edge gateway verification failed",
-        {
-          securityEvent:
-            true,
-
-          requestId:
-            req.requestId,
-
-          method:
-            req.method,
-
-          path:
-            req.originalUrl,
-
-          ip:
-            req.ip
-        }
-      );
+      logger.warn("Edge gateway verification failed", {
+        securityEvent: true,
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl,
+        ip: req.ip
+      });
 
       auditLogger.edgeRejected({
-        requestId:
-          req.requestId,
-
-        ip:
-          req.ip,
-
-        action:
-          "EDGE_SECRET_VERIFICATION",
-
+        requestId: req.requestId,
+        ip: req.ip,
+        action: "EDGE_SECRET_VERIFICATION",
         metadata: {
-          path:
-            req.originalUrl,
-
-          method:
-            req.method
+          path: req.originalUrl,
+          method: req.method
         }
       });
 
@@ -313,9 +241,14 @@ function edgeGatewayMiddleware({
       );
     }
 
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 5 — SUCCESS
+     * -------------------------------------------------------------------------
+     */
+
     setSecurityContext({
-      edgeVerified:
-        true
+      edgeVerified: true
     });
 
     return next();
@@ -340,25 +273,5 @@ module.exports = {
  * =============================================================================
  * END OF FILE
  * =============================================================================
- *
- * FINAL ENGINEERING SUMMARY
- * -----------------------------------------------------------------------------
- *
- * This module establishes:
- *
- *   ✅ Trusted edge-gateway enforcement
- *   ✅ Direct-origin access protection
- *   ✅ Timing-safe secret comparison
- *   ✅ Public health-route allowance
- *   ✅ Security audit generation
- *   ✅ Production-only mandatory enforcement
- *
- * -----------------------------------------------------------------------------
- * CORE PRINCIPLE
- * -----------------------------------------------------------------------------
- *
- *   "Origin APIs must only trust traffic that passes through controlled gateway
- *    boundaries."
- *
- * =============================================================================
  */
+
