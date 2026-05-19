@@ -113,7 +113,7 @@ const attendanceRepository =
   require("../repositories/attendance.repository");
 
 const logger =
-  require("../observability/logger");
+  require("../infrastructure/logging/logger");
 
 const requestContext =
   require("../observability/request-context");

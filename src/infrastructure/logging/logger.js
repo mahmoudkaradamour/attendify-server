@@ -1,69 +1,93 @@
 /**
  * =============================================================================
- * Attendify — Structured Logger (Enterprise Context-Aware Logging Engine)
+ * Attendify — Enterprise Structured Logger (Context-Aware Observability Core)
  * =============================================================================
  *
- * PURPOSE
+ * OVERVIEW
+ * =============================================================================
  *
- * This module implements a **high-fidelity structured logging system**
- * tightly integrated with execution context for distributed observability.
+ * This module implements a **high-fidelity structured logging system** designed
+ * for distributed backend systems operating under observability-first principles.
+ *
+ * The logger enforces:
+ *
+ *   ✅ Deterministic correlation across microservices
+ *   ✅ Context-aware logging (implicit propagation)
+ *   ✅ Structured JSON output (log aggregation ready)
+ *   ✅ Safe serialization under any runtime condition
  *
  * =============================================================================
  *
- * 🧠 FORMAL MODEL (LOG CONSTRUCTION)
+ * 🧠 FORMAL MODEL (LOG GENERATION FUNCTION)
  *
  * Let:
  *
- *   L = log event
- *   C = execution context
+ *   level ∈ {debug, info, warn, error}
+ *   message ∈ String | Object
  *   M = metadata
+ *   C = execution context
  *
  * Then:
  *
- *   L = f(level, message, M, C)
+ *   LogEntry = f(level, message, M, C)
  *
  * Producing:
  *
- *   JSON(logEntry)
+ *   JSON(LogEntry)
  *
  * =============================================================================
  *
- * 📊 LOG FLOW
+ * 📊 EXECUTION FLOW (PIPELINE MODEL)
  *
- *      Application Code
- *            │
- *            ▼
- *     logger.(info|error|...)
- *            │
- *            ▼
- *     Extract execution context
- *            │
- *            ▼
- *     Normalize metadata
- *            │
- *            ▼
- *     Enrich with correlation
- *            │
- *            ▼
- *     Serialize JSON
- *            │
- *            ▼
- *     Output stream (stdout / collector)
- *
- * =============================================================================
- *
- * 🔐 DESIGN OBJECTIVES
- *
- *   ✅ Deterministic correlation across systems
- *   ✅ Context-aware logging without manual injection
- *   ✅ Structured output (machine-ingestible)
- *   ✅ Safe serialization
+ *       Application Layer
+ *             │
+ *             ▼
+ *     logger.(info|warn|error)
+ *             │
+ *             ▼
+ *     Acquire Execution Context (AsyncLocalStorage)
+ *             │
+ *             ▼
+ *     Normalize Inputs (message + metadata)
+ *             │
+ *             ▼
+ *     Enrich Log Entry
+ *     ├─ requestId
+ *     ├─ traceId
+ *     ├─ correlationId
+ *     ├─ userId
+ *             │
+ *             ▼
+ *     Serialize (safe JSON)
+ *             │
+ *             ▼
+ *     Output → stdout (collector / log pipeline)
  *
  * =============================================================================
  *
- * ⚠️ CRITICAL PROPERTY
+ * 🔐 CRITICAL CORRELATION RULE
  *
  *   correlationId = traceId || requestId
+ *
+ * This guarantees continuity even if one identifier is missing.
+ *
+ * =============================================================================
+ *
+ * 🧪 LOG ENTRY SCHEMA
+ *
+ * {
+ *   level: string
+ *   message: string
+ *   timestamp: ISO8601
+ *   service: string
+ *
+ *   requestId: string | null
+ *   traceId: string | null
+ *   correlationId: string | null
+ *   userId: string | null
+ *
+ *   ...metadata
+ * }
  *
  * =============================================================================
  */
@@ -73,7 +97,7 @@ const {
 } = require("../../observability/request-context");
 
 /* =============================================================================
- * CONFIGURATION
+ * ENVIRONMENT CONFIGURATION
  * =============================================================================
  */
 
@@ -84,7 +108,7 @@ const NODE_ENV =
   process.env.NODE_ENV || "development";
 
 /* =============================================================================
- * LOG LEVELS
+ * LOG LEVEL DEFINITIONS
  * =============================================================================
  */
 
@@ -96,19 +120,22 @@ const LEVELS = Object.freeze({
 });
 
 /* =============================================================================
- * SAFE SERIALIZATION
+ * SAFE SERIALIZATION (CRITICAL)
  * =============================================================================
  *
- * Prevents crashing on circular structures
+ * Prevents runtime crashes due to:
+ *   - circular references
+ *   - unserializable values
  */
 
-function safeStringify(obj) {
+function safeStringify(value) {
 
   try {
-    return JSON.stringify(obj);
-  } catch (_) {
+    return JSON.stringify(value);
+  } catch (err) {
     return JSON.stringify({
-      error: "SerializationError"
+      serializationError: true,
+      message: "Failed to serialize log payload"
     });
   }
 }
@@ -116,16 +143,20 @@ function safeStringify(obj) {
 /* =============================================================================
  * ERROR NORMALIZATION
  * =============================================================================
+ *
+ * Converts Error objects into structured metadata.
  */
 
-function formatError(error) {
+function normalizeError(error) {
 
   if (!error) {
-    return { error: "unknown" };
+    return {
+      errorMessage: "Unknown error"
+    };
   }
 
   return {
-    errorMessage: error.message,
+    errorMessage: error.message || "Unknown",
     errorCode: error.code || null,
     stack:
       NODE_ENV === "production"
@@ -135,39 +166,58 @@ function formatError(error) {
 }
 
 /* =============================================================================
- * BASE LOGGER
+ * CORE LOG FUNCTION
  * =============================================================================
+ *
+ * This is the single source of truth for log creation.
  */
 
-function log(level, message, meta = {}) {
+function writeLog(level, message, meta = {}) {
 
-  const ctx = getContext();
+  const context = getContext?.() || {};
 
   const logEntry = {
 
-    /**
-     * Core fields
-     */
+    /* ------------------------------------------------------------- */
+    /* Core */
+    /* ------------------------------------------------------------- */
     level,
-    message: typeof message === "string" ? message : safeStringify(message),
+    message:
+      typeof message === "string"
+        ? message
+        : safeStringify(message),
 
-    timestamp: new Date().toISOString(),
+    timestamp:
+      new Date().toISOString(),
+
     service: SERVICE_NAME,
 
-    /**
-     * Correlation Layer (CRITICAL)
-     */
-    requestId: ctx?.requestId || null,
-    traceId: ctx?.traceId || null,
+    environment: NODE_ENV,
+
+    /* ------------------------------------------------------------- */
+    /* Context (Correlation Layer) */
+    /* ------------------------------------------------------------- */
+    requestId:
+      context.requestId || null,
+
+    traceId:
+      context.traceId || null,
+
     correlationId:
-      ctx?.traceId || ctx?.requestId || null,
+      context.traceId ||
+      context.requestId ||
+      null,
 
-    userId: ctx?.userId || null,
+    userId:
+      context.userId || null,
 
-    /**
-     * Metadata (safe merge)
-     */
-    ...(meta && typeof meta === "object" ? meta : { meta })
+    /* ------------------------------------------------------------- */
+    /* Metadata */
+    /* ------------------------------------------------------------- */
+    ...(meta && typeof meta === "object"
+      ? meta
+      : { meta })
+
   };
 
   process.stdout.write(
@@ -176,46 +226,94 @@ function log(level, message, meta = {}) {
 }
 
 /* =============================================================================
- * PUBLIC API
+ * PUBLIC LOGGER API
  * =============================================================================
  */
 
-function debug(message, meta) {
-  log(LEVELS.DEBUG, message, meta);
+function debug(message, meta = {}) {
+  writeLog(LEVELS.DEBUG, message, meta);
 }
 
-function info(message, meta) {
-  log(LEVELS.INFO, message, meta);
+function info(message, meta = {}) {
+  writeLog(LEVELS.INFO, message, meta);
 }
 
-function warn(message, meta) {
-  log(LEVELS.WARN, message, meta);
+function warn(message, meta = {}) {
+  writeLog(LEVELS.WARN, message, meta);
 }
 
 function error(message, err, meta = {}) {
 
-  const errorMeta = formatError(err);
+  const errorMeta =
+    normalizeError(err);
 
-  log(LEVELS.ERROR, message, {
-    ...errorMeta,
-    ...meta
-  });
+  writeLog(
+    LEVELS.ERROR,
+    message,
+    {
+      ...errorMeta,
+      ...meta
+    }
+  );
 }
 
 /* =============================================================================
- * EXPORTS
+ * ADAPTER (COMPATIBILITY LAYER)
  * =============================================================================
+ *
+ * Ensures compatibility with:
+ *   - code expecting logger object
+ *   - direct function imports
  */
 
-module.exports = {
+const logger = {
   debug,
   info,
   warn,
   error
 };
 
+/* =============================================================================
+ * EXPORTS
+ * =============================================================================
+ */
+
+module.exports = logger;
+
 /**
  * =============================================================================
+ * ARCHITECTURAL NOTES
+ * =============================================================================
+ *
+ * 1. LOGGING MODEL
+ * ---------------------------------------------------------------------------
+ * Logging is treated as a **pure side-effect system** with no business logic
+ * entanglement.
+ *
+ * 2. CONTEXT PROPAGATION
+ * ---------------------------------------------------------------------------
+ * Context is retrieved from AsyncLocalStorage (external system),
+ * eliminating the need to pass identifiers explicitly.
+ *
+ * 3. OBSERVABILITY INTEGRATION
+ * ---------------------------------------------------------------------------
+ * Output is JSON → designed for ingestion by:
+ *
+ *   - ELK stack (Elasticsearch)
+ *   - Datadog / New Relic
+ *   - Cloud log collectors
+ *
+ * 4. FAILURE RESILIENCE
+ * ---------------------------------------------------------------------------
+ * Logger must never throw → system must remain operational even if logging fails.
+ *
+ * 5. PERFORMANCE CONSIDERATION
+ * ---------------------------------------------------------------------------
+ * Uses stdout (non-blocking) and avoids heavy transformation.
+ *
+ * =============================================================================
+ *
  * END OF FILE
  * =============================================================================
  */
+

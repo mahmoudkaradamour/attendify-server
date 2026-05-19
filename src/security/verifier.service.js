@@ -364,7 +364,7 @@ const replayStore = require(
  * Structured operational logging.
  */
 const logger = require(
-  "../observability/logger"
+  "../infrastructure/logging/logger"
 );
 
 /**

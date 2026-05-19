@@ -69,7 +69,7 @@ const {
   ERROR_CODES
 } = require("../../shared/errors/error-codes");
 
-const logger = require("../../observability/logger");
+const logger = require("../../infrastructure/logging/logger");
 
 const attendanceRateLimiter = rateLimit({
 

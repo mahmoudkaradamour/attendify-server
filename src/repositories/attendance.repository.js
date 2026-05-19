@@ -92,7 +92,7 @@ const { getDb } =
   require("../infrastructure/mongo/mongo.connection");
 
 const logger =
-  require("../observability/logger");
+  require("../infrastructure/logging/logger");
 
 /* =============================================================================
  * CONSTANTS

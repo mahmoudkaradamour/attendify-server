@@ -98,7 +98,7 @@ const http = require("http");
 
 const config = require("./config/env");
 
-const logger = require("./observability/logger");
+const logger = require("./infrastructure/logging/logger");
 
 const { createApp } = require("./app/create-app");
 

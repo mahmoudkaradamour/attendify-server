@@ -137,7 +137,7 @@ const {
   sendError
 } = require("../shared/responses/api-response");
 
-const logger = require("../observability/logger");
+const logger = require("../infrastructure/logging/logger");
 
 const {
   getRequestId
