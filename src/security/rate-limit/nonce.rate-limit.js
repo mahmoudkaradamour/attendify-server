@@ -1,19 +1,20 @@
 /**
  * =============================================================================
- * Attendify — Nonce Issuance Rate Limiter (Security Boundary Control)
+ * Attendify — Nonce Issuance Rate Limiter (Enterprise Security Boundary Layer)
  * =============================================================================
  *
  * OVERVIEW
  * =============================================================================
  *
- * This module implements a **defensive rate-limiting strategy** for the nonce
- * generation endpoint — a critical unauthenticated surface in the system.
+ * This module defines a **strict rate-limiting middleware** designed to protect
+ * the nonce generation endpoint — one of the most critical unauthenticated
+ * surfaces in the system.
  *
- * The nonce endpoint is inherently sensitive because it:
+ * The nonce endpoint has the following properties:
  *
- *   • Is publicly accessible (unauthenticated)
- *   • Produces security-critical tokens
- *   • Can be abused as an amplification vector
+ *   • Publicly accessible (no authentication required)
+ *   • Generates security-critical tokens (nonce)
+ *   • Vulnerable to abuse if not controlled
  *
  * =============================================================================
  *
@@ -21,73 +22,92 @@
  *
  * Let:
  *
- *   R = incoming request
- *   K = request identity key (derived from IP)
- *   C(K, t) = number of requests from K within time window t
- *   L = maximum allowed requests
+ *   R  = incoming request
+ *   K  = client identity key
+ *   C  = request counter
+ *   W  = time window
+ *   L  = request limit
  *
  * Then:
  *
- *   accept(R) ⇔ C(K, t) < L
- *   reject(R) ⇔ C(K, t) ≥ L
+ *   accept(R) ⇔ C(K, W) < L
+ *   reject(R) ⇔ C(K, W) ≥ L
  *
  * =============================================================================
  *
- * 📊 REQUEST FLOW (CONTROL PIPELINE)
+ * 📊 CONTROL FLOW (PIPELINE MODEL)
  *
- *                 Client Request
- *                       │
- *                       ▼
- *         Key Derivation (IP normalization)
- *                       │
- *                       ▼
- *              Increment Request Counter
- *                       │
- *           ┌───────────┴───────────┐
- *           ▼                       ▼
- *        Allowed                Limit Exceeded
- *           │                       │
- *           ▼                       ▼
- *         next()              429 Response
- *           │                       │
- *           ▼                       ▼
- *     Continue Flow         Security Log + Audit
+ *               Incoming Request
+ *                      │
+ *                      ▼
+ *        Identity Extraction (Normalized IP)
+ *                      │
+ *                      ▼
+ *        Increment Counter(K, Window)
+ *                      │
+ *         ┌────────────┴────────────┐
+ *         ▼                         ▼
+ *      Allowed                 Blocked
+ *         │                         │
+ *         ▼                         ▼
+ *       next()               Reject (HTTP 429)
+ *         │                         │
+ *         ▼                         ▼
+ *   Business Pipeline        Log + Security Event
  *
  * =============================================================================
  *
  * 🔐 SECURITY CONSIDERATIONS
  *
- * 1. IPv6 Normalization
- * ---------------------------------------------------------------------------
- * Direct usage of `req.ip` is unsafe for IPv6 due to multiple textual
- * representations of the same address.
+ * 1. IPv6 NORMALIZATION (CRITICAL)
+ * -----------------------------------------------------------------------------
+ * Direct usage of:
  *
- * To prevent bypass, we use:
+ *   req.ip ❌
  *
- *   → ipKeyGenerator(req)
+ * is not safe due to:
  *
- * which ensures canonical normalization.
+ *   • Multiple textual representations for same IPv6 address
+ *   • Potential bypass of rate-limiting constraints
  *
- * 2. Abuse Resistance
- * ---------------------------------------------------------------------------
- * Prevents:
+ * Therefore:
  *
- *   • Burst attacks (rapid nonce generation)
- *   • Resource exhaustion (Redis / memory store)
- *   • Token precomputation pools
+ *   ✅ ipKeyGenerator(req)
  *
- * 3. Observability
- * ---------------------------------------------------------------------------
- * All violations are logged as security events for forensic analysis.
+ * is used to ensure canonical identity mapping.
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 2. ABUSE PREVENTION
+ * -----------------------------------------------------------------------------
+ * Protects against:
+ *
+ *   • Burst traffic attacks
+ *   • Nonce farming (pre-generation abuse)
+ *   • Resource exhaustion attacks
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 3. OBSERVABILITY (SECURITY TELEMETRY)
+ * -----------------------------------------------------------------------------
+ *
+ * Every violation produces a structured security event that can be:
+ *
+ *   • Indexed in log pipelines (ELK, Datadog)
+ *   • Used for threat analysis
+ *   • Monitored in real time
  *
  * =============================================================================
  *
- * ⚙️ POLICY PARAMETERS
+ * ⚙️ POLICY CONFIGURATION
  *
- *   TIME WINDOW: 5 minutes
- *   MAX REQUESTS: 60 per IP
+ *   WINDOW: 5 minutes
+ *   LIMIT : 60 requests per IP
  *
- *   → Balanced for human usage vs. abuse resistance
+ * Balanced to:
+ *
+ *   ✅ Allow legitimate usage
+ *   ✅ Prevent automated abuse
  *
  * =============================================================================
  */
@@ -95,11 +115,21 @@
 const rateLimit = require("express-rate-limit");
 
 /**
- * ✅ Correct IPv6-safe key generator
+ * =============================================================================
+ * IPv6-SAFE IDENTITY GENERATOR
+ * =============================================================================
+ *
+ * Library-provided normalization utility
  */
 const {
   ipKeyGenerator
 } = require("express-rate-limit");
+
+/**
+ * =============================================================================
+ * ERROR MODEL
+ * =============================================================================
+ */
 
 const {
   rateLimitError
@@ -109,8 +139,15 @@ const {
   ERROR_CODES
 } = require("../../shared/errors/error-codes");
 
-const logger =
-  require("../../infrastructure/logging/logger");
+/**
+ * =============================================================================
+ * OBSERVABILITY LAYER
+ * =============================================================================
+ */
+
+const logger = require(
+  "../../infrastructure/logging/logger"
+);
 
 /* =============================================================================
  * RATE LIMITER DEFINITION
@@ -121,26 +158,26 @@ const nonceRateLimiter = rateLimit({
 
   /**
    * ---------------------------------------------------------------------------
-   * Sliding Window Definition
+   * WINDOW CONFIGURATION
    * ---------------------------------------------------------------------------
    *
-   * Defines the temporal boundary of rate limiting.
+   * Defines the duration over which request counts are aggregated.
    */
-  windowMs: 5 * 60 * 1000,
+  windowMs: 5 * 60 * 1000, // 5 minutes
 
   /**
    * ---------------------------------------------------------------------------
-   * Request Threshold
+   * MAX REQUESTS
    * ---------------------------------------------------------------------------
    */
   max: 60,
 
   /**
    * ---------------------------------------------------------------------------
-   * Headers Strategy
+   * HEADERS CONFIGURATION
    * ---------------------------------------------------------------------------
    *
-   * Enables modern standard rate-limit headers.
+   * Exposes modern RFC-compliant rate limit headers.
    */
   standardHeaders: true,
 
@@ -148,40 +185,41 @@ const nonceRateLimiter = rateLimit({
 
   /**
    * ---------------------------------------------------------------------------
-   * KEY GENERATION (CRITICAL COMPONENT)
+   * KEY GENERATOR (CRITICAL SECURITY COMPONENT)
    * ---------------------------------------------------------------------------
    *
-   * Uses library-provided IPv6-safe normalization.
-   *
-   * Prevents:
-   *   • address representation bypass
-   *   • multiple identities for same client
+   * Uses normalized IP identity to prevent bypass.
    */
-  keyGenerator: (req) => {
+  keyGenerator: (req /*, res */) => {
     return ipKeyGenerator(req);
   },
 
   /**
    * ---------------------------------------------------------------------------
-   * LIMIT HANDLER
+   * RATE LIMIT HANDLER
    * ---------------------------------------------------------------------------
    *
-   * Triggered when rate limit is exceeded.
+   * Triggered when request exceeds defined limit.
    *
    * Responsibilities:
    *
-   *   • Record structured security log
-   *   • Propagate domain-specific error
+   *   • Log structured security event
+   *   • Propagate application-level error
    */
-  handler: (req, res, next) => {
+  handler: (req, res, next /*, options */) => {
 
-    logger.warn("Nonce endpoint rate limit exceeded", {
+    /**
+     * SECURITY EVENT LOG
+     */
+    logger.warn("Nonce rate limit exceeded", {
 
       securityEvent: true,
 
       category: "RATE_LIMIT",
 
       endpoint: "nonce",
+
+      severity: "medium",
 
       ip: req.ip,
 
@@ -192,6 +230,9 @@ const nonceRateLimiter = rateLimit({
       method: req.method
     });
 
+    /**
+     * APPLICATION ERROR PROPAGATION
+     */
     return next(
       rateLimitError(
         "Too many nonce generation requests",
@@ -213,40 +254,71 @@ module.exports = nonceRateLimiter;
  * ARCHITECTURAL NOTES
  * =============================================================================
  *
- * 1. IDENTITY RESOLUTION
- * ---------------------------------------------------------------------------
- * Client identity is derived exclusively from IP using normalized form.
+ * 1. IDENTITY MODEL
+ * -----------------------------------------------------------------------------
+ * Uses normalized IP identity:
  *
- * In future architectures, this may evolve to:
+ *   identity := normalized(IP)
  *
- *   • API key-based limits
- *   • User-level limits
- *   • Device fingerprinting
+ * This ensures:
  *
- * 2. STATE STORAGE
- * ---------------------------------------------------------------------------
- * Default memory store is acceptable for:
+ *   • determinism
+ *   • uniqueness
+ *   • bypass resistance
  *
- *   • development
- *   • low-scale environments
+ * -----------------------------------------------------------------------------
  *
- * For production:
+ * 2. STATE MODEL
+ * -----------------------------------------------------------------------------
+ * Default:
  *
- *   → Redis-backed store recommended
+ *   → In-memory store
  *
- * 3. FAILURE MODE
- * ---------------------------------------------------------------------------
- * Rate limiter must fail safely:
+ * Production recommendation:
  *
- *   • avoid crashing the process
- *   • degrade gracefully
+ *   → Redis distributed store
  *
- * 4. POSITION IN STACK
- * ---------------------------------------------------------------------------
- * This middleware should be applied:
+ *   Benefits:
+ *     • horizontal scaling
+ *     • shared limits across instances
  *
- *   → BEFORE business logic
- *   → AFTER request parsing
+ * -----------------------------------------------------------------------------
+ *
+ * 3. FAILURE CHARACTERISTICS
+ * -----------------------------------------------------------------------------
+ *
+ * Rate limiter guarantees:
+ *
+ *   • no process crash
+ *   • deterministic rejection
+ *   • safe degradation
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 4. POSITION IN REQUEST PIPELINE
+ * -----------------------------------------------------------------------------
+ *
+ * Request Flow:
+ *
+ *     Client
+ *       ↓
+ *     Edge Layer
+ *       ↓
+ *     Rate Limiter  ← (THIS MODULE)
+ *       ↓
+ *     Controllers / Business Logic
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 5. EXTENSIBILITY
+ * -----------------------------------------------------------------------------
+ *
+ * Future upgrades:
+ *
+ *   • Redis-backed distributed limits
+ *   • per-user limits (post-auth)
+ *   • dynamic throttling (adaptive limits)
+ *   • anomaly detection integration
  *
  * =============================================================================
  *

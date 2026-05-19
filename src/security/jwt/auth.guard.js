@@ -1,197 +1,277 @@
 /**
  * =============================================================================
- * Attendify — Auth Guard (Pure Authentication Domain Logic)
+ * Attendify — JWT Authentication Guard (Enterprise-Grade Security Middleware)
  * =============================================================================
  *
- * PURPOSE
+ * OVERVIEW
+ * =============================================================================
  *
- * This module implements the **core authentication verification logic**
- * responsible for transforming a raw token into a trusted user identity.
+ * This module implements a **high-assurance authentication guard** based on
+ * JSON Web Tokens (JWT). It is responsible for enforcing **identity validation**
+ * at the application boundary, ensuring that only authenticated entities are
+ * allowed to access protected resources.
+ *
+ * This file is considered part of the **core security perimeter**.
  *
  * =============================================================================
  *
- * 🧠 FORMAL MODEL (AUTHENTICATION FUNCTION)
+ * 🧠 FORMAL AUTHENTICATION MODEL
+ * =============================================================================
  *
  * Let:
  *
- *   T = token
- *   P = payload
- *   U = user identity
+ *   R  = Incoming HTTP request
+ *   H  = Authorization header
+ *   T  = Extracted JWT token
+ *   V(T) = Token verification function
+ *   P  = Decoded payload (user identity)
  *
  * Then:
  *
- *   verify(T):
+ *   AUTHENTICATED(R) ⇔ H exists ∧ T extracted ∧ V(T) = valid
  *
- *     decode(T) → validate(P) → normalize(U)
+ *   Otherwise:
  *
- * =============================================================================
- *
- * 📊 EXECUTION FLOW
- *
- *          Input Token (T)
- *                │
- *                ▼
- *     tokenService.verify(T)
- *                │
- *        ┌───────┴────────┐
- *        ▼                ▼
- *     Invalid           Valid
- *        │                │
- *        ▼                ▼
- *     Throw         Raw Payload (P)
- *                         │
- *                         ▼
- *             normalizeUserPayload(P)
- *                         │
- *                         ▼
- *               Validated User (U)
- *                         │
- *                         ▼
- *                      RETURN
+ *   REJECT(R) with 401 Unauthorized
  *
  * =============================================================================
  *
- * 🔐 SECURITY PROPERTIES
+ * 📊 AUTHENTICATION FLOW (DETAILED PIPELINE)
+ * =============================================================================
  *
- *   ✅ Fail closed (deny by default)
- *   ✅ No sensitive data leakage
- *   ✅ No transport coupling
- *   ✅ Stateless & deterministic
+ *                      ┌─────────────────────────┐
+ *                      │   Incoming HTTP Request │
+ *                      └────────────┬────────────┘
+ *                                   │
+ *                                   ▼
+ *                  Extract Authorization Header
+ *                                   │
+ *                   ┌───────────────┴───────────────┐
+ *                   ▼                               ▼
+ *              Missing Header                  Header Exists
+ *                   │                               │
+ *                   ▼                               ▼
+ *             Reject Request            Validate Bearer Format
+ *                                                │
+ *                               ┌────────────────┴──────────────┐
+ *                               ▼                               ▼
+ *                         Invalid Format                  Valid Format
+ *                               │                               │
+ *                               ▼                               ▼
+ *                         Reject Request              Verify JWT Signature
+ *                                                      │
+ *                                     ┌────────────────┴─────────────┐
+ *                                     ▼                              ▼
+ *                               Invalid | Expired              Valid Token
+ *                                     │                              │
+ *                                     ▼                              ▼
+ *                             Reject Request               Attach Identity
+ *                                                               │
+ *                                                               ▼
+ *                                                            next()
  *
  * =============================================================================
  *
- * ⚠️ CRITICAL CONSTRAINTS
+ * 🔐 SECURITY GOALS
+ * =============================================================================
  *
- *   - No Express dependency
- *   - No HTTP logic
- *   - No direct crypto usage here
+ * 1. Strong Identity Assurance
+ * ---------------------------------------------------------------------------
+ * Guarantees that every request is cryptographically bound to a verified entity.
+ *
+ * 2. Tamper Resistance
+ * ---------------------------------------------------------------------------
+ * Ensures token integrity via signature validation.
+ *
+ * 3. Replay Protection (partial)
+ * ---------------------------------------------------------------------------
+ * Relies on expiration (exp claim) + optional future revocation strategies.
+ *
+ * 4. Zero Trust Model
+ * ---------------------------------------------------------------------------
+ * No request is trusted by default.
+ *
+ * =============================================================================
+ *
+ * ⚙️ DESIGN PRINCIPLES
+ * =============================================================================
+ *
+ * • Fail-fast rejection on any invalid condition
+ * • Stateless authentication (JWT-based)
+ * • Observability via structured logging
+ * • Explicit error propagation
  *
  * =============================================================================
  */
 
-const tokenService =
-  require("./token.service");
+const jwt = require("jsonwebtoken");
 
-const AppError =
-  require("../../shared/errors/app-error");
+const {
+  unauthorizedError
+} = require("../../shared/errors/app-error");
+
+const {
+  ERROR_CODES
+} = require("../../shared/errors/error-codes");
+
+const logger = require("../../infrastructure/logging/logger");
 
 /* =============================================================================
- * TYPE UTILITIES
+ * CONFIGURATION
  * =============================================================================
  */
 
-function ensureArray(value) {
-  if (!value) return [];
-  if (Array.isArray(value)) return value;
-  return [value];
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
 /* =============================================================================
- * NORMALIZE USER PAYLOAD
+ * TOKEN EXTRACTION
  * =============================================================================
  *
- * Converts arbitrary JWT payload into strict internal identity model.
+ * Extracts a token from Authorization header.
+ *
+ * Expected format:
+ *   Authorization: Bearer <token>
  */
 
-function normalizeUserPayload(payload) {
+function extractBearerToken(req) {
+
+  const header = req.headers["authorization"];
+
+  if (!header) return null;
+
+  const parts = header.split(" ");
 
   /**
-   * STEP 1 — STRUCTURE VALIDATION
+   * Defensive validation against malformed headers
    */
-  if (!payload || typeof payload !== "object") {
-    throw new AppError("Invalid token payload", 401);
-  }
+  if (parts.length !== 2) return null;
 
-  /**
-   * STEP 2 — EXTRACT CORE FIELDS
-   */
-  const id =
-    payload.sub ||
-    payload.userId ||
-    null;
+  const [scheme, token] = parts;
 
-  if (!id || typeof id !== "string") {
-    throw new AppError("Invalid token subject", 401);
-  }
+  if (scheme !== "Bearer") return null;
 
-  /**
-   * STEP 3 — NORMALIZE ARRAYS
-   */
-  const roles =
-    ensureArray(payload.roles)
-      .filter(Boolean);
-
-  const permissions =
-    ensureArray(payload.permissions)
-      .filter(Boolean);
-
-  /**
-   * STEP 4 — BUILD IMMUTABLE USER MODEL
-   */
-  const user = {
-    id,
-    roles,
-    permissions
-  };
-
-  return Object.freeze(user);
+  return token;
 }
 
 /* =============================================================================
- * VERIFY TOKEN (CORE ENTRY POINT)
+ * AUTH GUARD
  * =============================================================================
  */
 
-async function verify(token) {
+function authGuard(req, res, next) {
 
   /**
-   * STEP 0 — INPUT VALIDATION
+   * ---------------------------------------------------------------------------
+   * STEP 1 — Token Extraction
+   * ---------------------------------------------------------------------------
    */
-  if (!token || typeof token !== "string") {
-    throw new AppError("Missing token", 401);
+  const token = extractBearerToken(req);
+
+  if (!token) {
+
+    logger.warn("Authentication failed: Missing token", {
+
+      securityEvent: true,
+      category: "AUTH",
+
+      reason: "TOKEN_MISSING",
+
+      ip: req.ip,
+      path: req.originalUrl,
+      method: req.method,
+      requestId: req.requestId
+    });
+
+    return next(
+      unauthorizedError(
+        "Authentication token is required",
+        ERROR_CODES.AUTH_UNAUTHORIZED
+      )
+    );
   }
+
+  /**
+   * ---------------------------------------------------------------------------
+   * STEP 2 — Token Verification
+   * ---------------------------------------------------------------------------
+   *
+   * JWT verification performs:
+   *
+   *   • Signature validation
+   *   • Expiration check
+   *   • Payload integrity validation
+   */
 
   try {
 
-    /**
-     * -------------------------------------------------------------------------
-     * STEP 1 — VERIFY TOKEN (SIGNATURE + EXPIRATION)
-     * -------------------------------------------------------------------------
-     */
-    const payload =
-      await tokenService.verify(token);
+    const decoded = jwt.verify(token, JWT_SECRET);
 
     /**
      * -------------------------------------------------------------------------
-     * STEP 2 — NORMALIZE USER MODEL
-     * -------------------------------------------------------------------------
-     */
-    const user =
-      normalizeUserPayload(payload);
-
-    /**
-     * -------------------------------------------------------------------------
-     * STEP 3 — RETURN TRUSTED IDENTITY
-     * -------------------------------------------------------------------------
-     */
-    return user;
-
-  } catch (err) {
-
-    /**
-     * -------------------------------------------------------------------------
-     * STEP 4 — UNIFIED FAILURE RESPONSE
+     * STEP 3 — Context Injection
      * -------------------------------------------------------------------------
      *
-     * DO NOT leak internal failure details:
-     *   - signature failure
-     *   - expiration
-     *   - invalid structure
+     * Attach authenticated user context to request object.
      */
 
-    throw new AppError(
-      "Authentication failed",
-      401
+    req.user = decoded;
+
+    req.auth = {
+
+      /**
+       * Identity
+       */
+      userId: decoded.id,
+
+      /**
+       * Authorization attributes
+       */
+      roles: decoded.roles || [],
+
+      /**
+       * Temporal metadata
+       */
+      issuedAt: decoded.iat,
+      expiresAt: decoded.exp
+    };
+
+    /**
+     * -------------------------------------------------------------------------
+     * STEP 4 — Continue Execution
+     * -------------------------------------------------------------------------
+     */
+    return next();
+
+  } catch (error) {
+
+    /**
+     * -------------------------------------------------------------------------
+     * ERROR HANDLING (SECURITY-CRITICAL)
+     * -------------------------------------------------------------------------
+     */
+
+    logger.warn("Authentication failed: Invalid token", {
+
+      securityEvent: true,
+      category: "AUTH",
+
+      reason: error.name,
+
+      ip: req.ip,
+      path: req.originalUrl,
+      method: req.method,
+      requestId: req.requestId
+    });
+
+    return next(
+      unauthorizedError(
+        "Invalid or expired authentication token",
+        ERROR_CODES.AUTH_INVALID_TOKEN
+      )
     );
   }
 }
@@ -201,12 +281,60 @@ async function verify(token) {
  * =============================================================================
  */
 
-module.exports = {
-  verify
-};
+module.exports = authGuard;
 
 /**
  * =============================================================================
+ * ADVANCED SECURITY NOTES
+ * =============================================================================
+ *
+ * 1. JWT CLAIMS MODEL
+ * ---------------------------------------------------------------------------
+ *
+ * Standard payload expected:
+ *
+ * {
+ *   id: string,
+ *   roles: string[],
+ *   iat: number,
+ *   exp: number
+ * }
+ *
+ * 2. EXTENSION POINTS
+ * ---------------------------------------------------------------------------
+ *
+ * This guard can be extended with:
+ *
+ *   • RBAC enforcement layer
+ *   • Permission resolvers
+ *   • Multi-tenant scoping
+ *   • Device validation
+ *
+ * 3. RECOMMENDED HARDENING (ENTERPRISE)
+ * ---------------------------------------------------------------------------
+ *
+ *   ✔ Token revocation list (Redis)
+ *   ✔ Short-lived access tokens
+ *   ✔ Refresh token rotation
+ *   ✔ IP / Device binding
+ *
+ * 4. PERFORMANCE CHARACTERISTICS
+ * ---------------------------------------------------------------------------
+ *
+ *   • O(1) verification time
+ *   • CPU-bound cryptographic validation
+ *   • No DB dependency (stateless)
+ *
+ * 5. FAILURE MODES
+ * ---------------------------------------------------------------------------
+ *
+ *   • Missing token → 401
+ *   • Malformed token → 401
+ *   • Expired token → 401
+ *   • Invalid signature → 401
+ *
+ * =============================================================================
+ *
  * END OF FILE
  * =============================================================================
  */
