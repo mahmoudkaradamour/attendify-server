@@ -1,209 +1,261 @@
 /**
- * Attendify — Evidence Queue Definition (Enterprise-Grade) * =============================================================================
+ * =============================================================================
+ * Attendify — Evidence Worker (Enterprise-Grade Asynchronous Execution Engine)
  * =============================================================================
  *
- * FILE:
- *   src/jobs/evidence.queue.js
- *
- * =============================================================================
- * 🎯 PURPOSE (FORMAL)
+ * OVERVIEW
  * =============================================================================
  *
- * This module defines the **Queue Abstraction Layer** responsible for managing
- * asynchronous job scheduling for evidence delivery.
+ * This module implements a **high-reliability distributed worker** responsible for:
  *
- * -----------------------------------------------------------------------------
- * 🧠 CONCEPTUAL MODEL
- * -----------------------------------------------------------------------------
+ *   • Consuming jobs from Redis-backed queue (BullMQ)
+ *   • Executing business logic in isolated async contexts
+ *   • Ensuring deterministic processing outcomes
+ *   • Providing deep observability & traceability
+ *
+ * =============================================================================
+ *
+ * 🧠 FORMAL MODEL
+ * =============================================================================
  *
  * Let:
  *
- *   R = incoming request
- *   J = job representation of R
- *   Q = queue system
+ *   Q = Queue (distributed job store)
+ *   J = Job (unit of work)
+ *   W = Worker (consumer process)
  *
  * Then:
  *
- *   f(R) → enqueue(J) → Q
+ *   W(Q) = ∀ J ∈ Q → execute(J) → outcome(J)
  *
- * where J is executed asynchronously by worker processes.
+ * Where:
  *
- * -----------------------------------------------------------------------------
- * 📊 SYSTEM FLOW (QUEUE FLOW)
- * -----------------------------------------------------------------------------
+ *   outcome ∈ { SUCCESS, FAILURE, RETRY }
  *
- *     API REQUEST
- *         │
- *         ▼
- *   ┌─────────────────┐
- *   │ enqueueEvidence │
- *   └─────────┬───────┘
- *             ▼
- *       ┌───────────┐
- *       │   QUEUE   │
- *       └─────┬─────┘
- *             ▼
- *        WORKER PROCESS
- *             ▼
- *     Company Integration
+ * =============================================================================
  *
- * -----------------------------------------------------------------------------
- * 🚀 BENEFITS OF QUEUE MODEL
- * -----------------------------------------------------------------------------
+ * 📊 EXECUTION PIPELINE (DETAILED)
+ * =============================================================================
  *
- *   ✅ Non-blocking API responses (low latency)
- *   ✅ Improved fault tolerance
- *   ✅ Scalability via parallel workers
- *   ✅ Controlled retry and failure isolation
+ *              Redis Queue
+ *                  │
+ *                  ▼
+ *           Worker Polling Cycle
+ *                  │
+ *                  ▼
+ *          Job Retrieved (atomic)
+ *                  │
+ *                  ▼
+ *         Context Initialization (ALS)
+ *                  │
+ *                  ▼
+ *           Trace Span Creation
+ *                  │
+ *                  ▼
+ *          Business Logic Execution
+ *                  │
+ *        ┌─────────┴──────────┐
+ *        ▼                    ▼
+ *     SUCCESS              FAILURE
+ *        │                    │
+ *        ▼                    ▼
+ *  Mark Completed       Retry / Fail
  *
- * -----------------------------------------------------------------------------
- * 🧱 DESIGN PRINCIPLES
- * -----------------------------------------------------------------------------
+ * =============================================================================
  *
- *   - Decoupled execution
- *   - Retry-driven resilience
- *   - Deterministic job processing
- *   - Backpressure control
+ * 🔐 SYSTEM GUARANTEES
+ * =============================================================================
+ *
+ *   ✅ At-least-once processing
+ *   ✅ Context isolation per job
+ *   ✅ Distributed safe execution
+ *   ✅ Fault-tolerant retries
+ *   ✅ Observability with trace propagation
  *
  * =============================================================================
  */
 
-const { Queue } = require("bullmq");
+const { Worker } = require("bullmq");
 
-/**
- * Redis connection (shared infrastructure)
- */
-const redisConnection =
-  require("../infrastructure/redis/redis.client");
+const attendanceService =
+  require("../services/attendance.service");
+
+const logger =
+  require("../infrastructure/logging/logger");
+
+const {
+  trace
+} = require("../infrastructure/tracing/tracer");
+
+const {
+  runWithContext
+} = require("../observability/request-context");
 
 /* =============================================================================
- * QUEUE CONFIGURATION
- * =============================================================================
- */
-
-/**
- * Queue name (global identifier)
- */
-const QUEUE_NAME = "evidence-delivery";
-
-/**
- * Default retry attempts
- */
-const DEFAULT_ATTEMPTS = 5;
-
-/**
- * Base delay for exponential backoff (ms)
- */
-const BASE_DELAY = 500;
-
-/**
- * Remove completed jobs automatically
- * Prevents memory bloat
- */
-const REMOVE_ON_COMPLETE = true;
-
-/**
- * Retain failed jobs for debugging
- */
-const REMOVE_ON_FAIL = false;
-
-/* =============================================================================
- * QUEUE INITIALIZATION
+ * REDIS CONNECTION (BULLMQ REQUIREMENT)
  * =============================================================================
  *
- * BullMQ Queue Instance
+ * BullMQ requires a connection configuration object
+ * NOT a Redis instance.
  */
 
-const evidenceQueue = new Queue(QUEUE_NAME, {
-  connection: redisConnection
+const redisConnection = {
+  connectionString: process.env.REDIS_URL
+};
+
+/* =============================================================================
+ * CONTEXT CREATION (ASYNC LOCAL STORAGE MODEL)
+ * =============================================================================
+ *
+ * Ensures:
+ *
+ *   • No context leakage across jobs
+ *   • Trace consistency
+ *   • Request correlation
+ */
+
+function createWorkerContext(job) {
+
+  const data = job.data || {};
+
+  return {
+    requestId: data.requestId || `job-${job.id}`,
+    traceId: data.traceId || null,
+
+    /**
+     * CRITICAL:
+     * Worker MUST NOT inherit user identity implicitly
+     */
+    userId: null,
+
+    metadata: {
+      source: "worker",
+      jobId: job.id
+    }
+  };
+}
+
+/* =============================================================================
+ * JOB PROCESSOR (CORE EXECUTION UNIT)
+ * =============================================================================
+ */
+
+async function processJob(job) {
+
+  const context =
+    createWorkerContext(job);
+
+  return runWithContext(context, async () => {
+
+    return trace(
+      "worker.evidence.process",
+      async (span) => {
+
+        logger.info("Worker job started", {
+          jobId: job.id
+        });
+
+        try {
+
+          /**
+           * BUSINESS EXECUTION
+           *
+           * This is the actual domain invocation.
+           *
+           * NOTE:
+           * The service MUST remain deterministic.
+           */
+          await attendanceService.markAttendance(
+            job.data
+          );
+
+          logger.info("Worker job completed", {
+            jobId: job.id
+          });
+
+        } catch (error) {
+
+          /**
+           * Trace enrichment
+           */
+          if (span) {
+            span.metadata = {
+              ...span.metadata,
+              error: error.message
+            };
+          }
+
+          logger.error("Worker job failed", error, {
+            jobId: job.id
+          });
+
+          /**
+           * CRITICAL:
+           * Throwing error triggers:
+           *
+           *   • retry mechanism
+           *   • failure routing
+           */
+          throw error;
+        }
+      }
+    );
+  });
+}
+
+/* =============================================================================
+ * WORKER CONSUMER INITIALIZATION
+ * =============================================================================
+ *
+ * IMPORTANT:
+ *
+ * Queue name MUST match producer exactly.
+ */
+
+const worker = new Worker(
+  "evidence-delivery",
+  processJob,
+  {
+    connection: redisConnection
+  }
+);
+
+/* =============================================================================
+ * EVENT OBSERVABILITY LAYER
+ * =============================================================================
+ */
+
+worker.on("completed", (job) => {
+
+  logger.info("Job completed (event)", {
+    jobId: job.id
+  });
+});
+
+worker.on("failed", (job, err) => {
+
+  logger.error("Job failed (event)", err, {
+    jobId: job?.id
+  });
+});
+
+worker.on("error", (err) => {
+
+  logger.error("Worker system error", err);
 });
 
 /* =============================================================================
- * JOB CREATION FUNCTION
+ * GRACEFUL SHUTDOWN SUPPORT
  * =============================================================================
- *
- * Wraps BullMQ add() with standardized configuration.
- *
- * -----------------------------------------------------------------------------
- * INPUT:
- *
- *   payload:
- *     {
- *       companyId,
- *       evidence,
- *       metadata,
- *       employeeToken,
- *       employeeId,
- *       requestId,
- *       timestamp,
- *       version
- *     }
- *
- * -----------------------------------------------------------------------------
- * OUTPUT:
- *
- *   Promise → job created
- *
- * -----------------------------------------------------------------------------
- * RETRY STRATEGY
- * -----------------------------------------------------------------------------
- *
- * Exponential backoff:
- *
- *   delay = base * 2^attempt
- *
- * Controlled retries:
- *
- *   prevents system overload
- *   prevents infinite retry loops
- *
- * -----------------------------------------------------------------------------
  */
 
-async function addEvidenceJob(payload) {
+async function close() {
 
-  /**
-   * Validate minimal payload integrity (defensive layer)
-   */
-  if (!payload || typeof payload !== "object") {
-    throw new Error("Invalid job payload");
-  }
+  logger.warn("Worker shutting down");
 
-  /**
-   * Add job to queue
-   */
-  return await evidenceQueue.add(
-    "process-evidence",
-    payload,
-    {
-      attempts: DEFAULT_ATTEMPTS,
+  await worker.close();
 
-      /**
-       * Backoff strategy
-       */
-      backoff: {
-        type: "exponential",
-        delay: BASE_DELAY
-      },
-
-      /**
-       * Cleanup behavior
-       */
-      removeOnComplete: REMOVE_ON_COMPLETE,
-      removeOnFail: REMOVE_ON_FAIL,
-
-      /**
-       * Job-level identity
-       *
-       * If idempotency key exists:
-       *   → use it as jobId to prevent duplicates in queue
-       */
-      jobId:
-        payload.idempotencyKey ||
-        payload.requestId ||
-        undefined
-    }
-  );
+  logger.warn("Worker stopped");
 }
 
 /* =============================================================================
@@ -211,65 +263,68 @@ async function addEvidenceJob(payload) {
  * =============================================================================
  */
 
-module.exports = evidenceQueue;
-module.exports.addEvidenceJob = addEvidenceJob;
+module.exports = {
+  worker,
+  close
+};
 
 /**
  * =============================================================================
- * 🏁 END OF FILE
+ * ADVANCED ARCHITECTURAL NOTES
  * =============================================================================
  *
+ * 1. EXECUTION SEMANTICS
+ * -----------------------------------------------------------------------------
+ *
+ * This worker guarantees:
+ *
+ *   • Exactly-once effect (via idempotent service)
+ *   • At-least-once execution (queue guarantee)
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 2. FAILURE HANDLING MODEL
+ * -----------------------------------------------------------------------------
+ *
+ *   error → retry → exponential backoff → eventual failure
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 3. DISTRIBUTED CONCURRENCY
+ * -----------------------------------------------------------------------------
+ *
+ * Multiple workers can run:
+ *
+ *   W₁, W₂, W₃ ...
+ *
+ * All pulling from same queue.
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 4. ISOLATION PROPERTY
+ * -----------------------------------------------------------------------------
+ *
+ * Each job execution:
+ *
+ *   isolated(context_i) ∧ deterministic
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * 5. RELATION TO SYSTEM
+ * -----------------------------------------------------------------------------
+ *
+ * Controller
+ *     ▼
+ * Queue Producer
+ *     ▼
+ * Redis Queue
+ *     ▼
+ * THIS WORKER ✅
+ *     ▼
+ * Domain Service
+ *
  * =============================================================================
- * 🧠 ACADEMIC INSIGHT
- * =============================================================================
  *
- * This module implements:
- *
- *   → Message Queue Pattern
- *   → Deferred Execution Model
- *   → Retry-Oriented Fault Recovery
- *
- * -----------------------------------------------------------------------------
- * FORMAL GUARANTEE
- * -----------------------------------------------------------------------------
- *
- * Given a job J:
- *
- *   execution(J) ∈ {0, 1, ... retryLimit}
- *
- * bounded retries ensure:
- *
- *   - system stability
- *   - predictable recovery behavior
- *
- * -----------------------------------------------------------------------------
- * SYSTEM PROPERTIES
- * -----------------------------------------------------------------------------
- *
- *   ✅ At-least-once processing
- *   ✅ Controlled retry behavior
- *   ✅ Load leveling (backpressure handling)
- *
- * -----------------------------------------------------------------------------
- * CRITICAL INTEGRATION REQUIREMENT
- * -----------------------------------------------------------------------------
- *
- * Must be paired with:
- *
- *   → Worker system (Consumer)
- *
- * without worker:
- *
- *   ❗ jobs are never processed
- *
- * -----------------------------------------------------------------------------
- * DISTRIBUTED SYSTEM NOTE
- * -----------------------------------------------------------------------------
- *
- * Multiple workers can consume from the same queue:
- *
- *   → horizontal scalability
- *   → parallel execution
- *
+ * END OF FILE
  * =============================================================================
  */
